@@ -1,7 +1,7 @@
 /******************************************************************************
  * The MIT License (MIT)
  *
- * Copyright (c) 2019-2024 Baldur Karlsson
+ * Copyright (c) 2016-2026 Baldur Karlsson
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -38,6 +38,7 @@
 #include <QTimer>
 #include "Code/Resources.h"
 #include "Code/pyrenderdoc/PythonContext.h"
+#include "Widgets/AnnotationDisplay.h"
 #include "Windows/APIInspector.h"
 #include "Windows/BufferViewer.h"
 #include "Windows/CommentView.h"
@@ -158,43 +159,47 @@ CaptureContext::CaptureContext(PersistantConfig &cfg) : m_Config(cfg)
 
       bool add_report = false;
 
-      if(CrashDialog::HasCaptureReady(m_Config))
+      if(m_MainWindow->ErrorReportsAllowed())
       {
-        text += tr(
-            "If you think this may be a RenderDoc bug please click the button below to report it, "
-            "but note that this will require you to upload the capture for reproduction as "
-            "otherwise it is impossible to tell what the problem may be.");
-
-        add_report = true;
-      }
-      else if(CrashDialog::CaptureTooLarge(m_Config))
-      {
-        text = tr("<html>%1<br><br>"
-                  "Your capture is too lage to upload as a crash report so this can't be "
-                  "automatically reported. "
-                  "Please email me at <a "
-                  "href=\"mailto:baldurk@baldurk.org?subject=RenderDoc%20Unrecoverable%20error\">"
-                  "baldurk@baldurk.org</a> with information and I can help investigate.</html>")
-                   .arg(text);
-      }
-      else
-      {
-        text += tr("The capture must be saved locally if you want to report this as a bug. ");
-
-        if(Replay().CurrentRemote().IsConnected())
+        if(CrashDialog::HasCaptureReady(m_Config))
         {
           text +=
-              tr("Before closing the capture you can save it to disk and manually report a bug. "
-                 "Please include the capture, or else it will be impossible to tell what the "
-                 "problem may be.");
+              tr("If you think this may be a RenderDoc bug please click the button below to report "
+                 "it, "
+                 "but note that this will require you to upload the capture for reproduction as "
+                 "otherwise it is impossible to tell what the problem may be.");
+
+          add_report = true;
+        }
+        else if(CrashDialog::CaptureTooLarge(m_Config))
+        {
+          text = tr("<html>%1<br><br>"
+                    "Your capture is too lage to upload as a crash report so this can't be "
+                    "automatically reported. "
+                    "Please email me at <a "
+                    "href=\"mailto:baldurk@baldurk.org?subject=RenderDoc%20Unrecoverable%20error\">"
+                    "baldurk@baldurk.org</a> with information and I can help investigate.</html>")
+                     .arg(text);
         }
         else
         {
-          text += tr("You will need to reconnect to the remote server to save the capture.");
+          text += tr("The capture must be saved locally if you want to report this as a bug. ");
+
+          if(Replay().CurrentRemote().IsConnected())
+          {
+            text +=
+                tr("Before closing the capture you can save it to disk and manually report a bug. "
+                   "Please include the capture, or else it will be impossible to tell what the "
+                   "problem may be.");
+          }
+          else
+          {
+            text += tr("You will need to reconnect to the remote server to save the capture.");
+          }
         }
       }
 
-      QMessageBox mb(QMessageBox::Critical, title, text, QMessageBox::Ok, m_MainWindow);
+      QMessageBox mb(QMessageBox::Critical, title, text.trimmed(), QMessageBox::Ok, m_MainWindow);
       mb.setDefaultButton(QMessageBox::NoButton);
       QPushButton *report = NULL;
       if(add_report)
@@ -300,7 +305,7 @@ rdcarray<ExtensionMetadata> CaptureContext::GetInstalledExtensions()
 
   for(QString extensionFolder : PythonContext::GetApplicationExtensionsPaths())
   {
-    QDirIterator it(extensionFolder, QDirIterator::Subdirectories);
+    QDirIterator it(extensionFolder, QDirIterator::Subdirectories | QDirIterator::FollowSymlinks);
 
     while(it.hasNext())
     {
@@ -941,6 +946,7 @@ void CaptureContext::LoadCaptureThreaded(const QString &captureFile, const Repla
                                          const QString &origFilename, bool temporary, bool local)
 {
   m_CaptureFile = origFilename;
+  m_RemoteFile = captureFile;
 
   m_CaptureLocal = local;
 
@@ -1088,6 +1094,9 @@ void CaptureContext::LoadCaptureThreaded(const QString &captureFile, const Repla
 
     m_PostloadProgress = 1.0f;
   });
+
+  if(m_FrameInfo.containsAnnotations)
+    ANALYTIC_SET(CaptureFeatures.CustomAnnotations, true);
 
   QThread::msleep(20);
 
@@ -1423,6 +1432,7 @@ void CaptureContext::CloseCapture()
   m_CaptureTemporary = false;
 
   m_CaptureFile = QString();
+  m_RemoteFile = QString();
 
   m_APIProps = APIProperties();
   m_FrameInfo = FrameDescription();
@@ -1739,6 +1749,17 @@ void CaptureContext::AddMessages(const rdcarray<DebugMessage> &msgs)
   }
 }
 
+void CaptureContext::ClearMessages()
+{
+  m_UnreadMessageCount = 0;
+  m_DebugMessages.clear();
+
+  if(m_DebugMessageView)
+  {
+    GUIInvoke::call(m_DebugMessageView, [this]() { m_DebugMessageView->RefreshMessageList(); });
+  }
+}
+
 void CaptureContext::SetNotes(const rdcstr &key, const rdcstr &contents)
 {
   // ignore no-op changes
@@ -1782,6 +1803,11 @@ void CaptureContext::RemoveBookmark(uint32_t EID)
   SetModification(CaptureModifications::Bookmarks);
 
   RefreshUIStatus({}, true, true);
+}
+
+void CaptureContext::DelayedCallback(uint32_t milliseconds, std::function<void()> callback)
+{
+  QTimer::singleShot(milliseconds, callback);
 }
 
 void CaptureContext::SetModification(CaptureModifications mod)
@@ -2003,6 +2029,13 @@ void CaptureContext::LoadEdits(const QString &data)
       m_ShaderEditors.push_back(edit);
     }
   }
+}
+
+void CaptureContext::ClearReplayCache()
+{
+  m_CustomNameCachedID++;
+
+  Replay().AsyncInvoke([](IReplayController *r) { r->ClearReplayCache(); });
 }
 
 bool CaptureContext::OpenRGPProfile(const rdcstr &filename)
@@ -2232,6 +2265,18 @@ IAPIInspector *CaptureContext::GetAPIInspector()
   return m_APIInspector;
 }
 
+IAnnotationViewer *CaptureContext::GetAnnotationViewer()
+{
+  if(m_AnnotationViewer)
+    return m_AnnotationViewer;
+
+  m_AnnotationViewer = new AnnotationDisplay(*this, true, m_MainWindow);
+  m_AnnotationViewer->setObjectName(lit("annotationViewer"));
+  setupDockWindow(m_AnnotationViewer, true);
+
+  return m_AnnotationViewer;
+}
+
 ITextureViewer *CaptureContext::GetTextureViewer()
 {
   if(m_TextureViewer)
@@ -2396,6 +2441,11 @@ void CaptureContext::ShowEventBrowser()
 void CaptureContext::ShowAPIInspector()
 {
   m_MainWindow->showAPIInspector();
+}
+
+void CaptureContext::ShowAnnotationViewer()
+{
+  m_MainWindow->showAnnotationViewer();
 }
 
 void CaptureContext::ShowTextureViewer()
@@ -2664,6 +2714,10 @@ QWidget *CaptureContext::CreateBuiltinWindow(const rdcstr &objectName)
   {
     return GetAPIInspector()->Widget();
   }
+  else if(objectName == "annotationViewer")
+  {
+    return GetAnnotationViewer()->Widget();
+  }
   else if(objectName == "capDialog")
   {
     return GetCaptureDialog()->Widget();
@@ -2832,4 +2886,94 @@ void CaptureContext::AddDockWindow(QWidget *newWindow, DockReference ref, QWidge
   ToolWindowManager::AreaReference areaRef((ToolWindowManager::AreaReferenceType)ref,
                                            manager->areaOf(refWindow), percentage);
   manager->addToolWindow(newWindow, areaRef);
+}
+
+void CaptureContext::EmbedDependentFiles()
+{
+  if(!m_Replay.GetCaptureAccess())
+    return;
+
+  // Always operate on the capture access (local or remote)
+  QString tag = lit("replayEmbedDependenciesIntoCapture");
+  bool done = false;
+
+  Replay().AsyncInvoke(tag, [this, &done](IReplayController *) {
+    m_Replay.GetCaptureAccess()->EmbedDependenciesIntoCapture();
+    done = true;
+  });
+
+  // wait a short while before displaying the progress dialog
+  for(int i = 0; !done && (i < 100 || m_Replay.GetCurrentProcessingTag().isEmpty() ||
+                           m_Replay.GetCurrentProcessingTag() == tag);
+      i++)
+    QThread::msleep(5);
+
+  ShowProgressDialog(m_MainWindow->Widget(), tr("Please wait, working..."),
+                     [&done]() { return done; });
+
+  // Local replay
+  if(m_Replay.GetCaptureFile())
+    return;
+
+  // Remote capture : no local capture file
+  if(IsCaptureTemporary())
+    return;
+
+  // Local capture file being replayed remotely : copy back from the remote
+  if(IsCaptureLocal())
+  {
+    Replay().CopyCaptureFromRemote(m_RemoteFile, m_CaptureFile, m_MainWindow);
+
+    if(!QFile::exists(m_CaptureFile))
+    {
+      RDDialog::critical(m_MainWindow, tr("Failed to save capture"),
+                         tr("Capture couldn't be copied from remote."));
+      return;
+    }
+  }
+}
+
+void CaptureContext::RemoveDependentFiles()
+{
+  if(!m_Replay.GetCaptureAccess())
+    return;
+
+  // Always operate on the capture access (local or remote)
+  QString tag = lit("replayRemoveDependenciesFromCapture");
+  bool done = false;
+
+  Replay().AsyncInvoke(tag, [this, &done](IReplayController *) {
+    m_Replay.GetCaptureAccess()->RemoveDependenciesFromCapture();
+    done = true;
+  });
+
+  // wait a short while before displaying the progress dialog
+  for(int i = 0; !done && (i < 100 || m_Replay.GetCurrentProcessingTag().isEmpty() ||
+                           m_Replay.GetCurrentProcessingTag() == tag);
+      i++)
+    QThread::msleep(5);
+
+  ShowProgressDialog(m_MainWindow->Widget(), tr("Please wait, working..."),
+                     [&done]() { return done; });
+
+  // Local replay
+  if(m_Replay.GetCaptureFile())
+    return;
+
+  // Remote capture : no local capture file
+  if(IsCaptureTemporary())
+    return;
+
+  // Local capture file being replayed remotely : copy back from the remote
+  if(IsCaptureLocal())
+  {
+    Replay().CopyCaptureFromRemote(m_RemoteFile, m_CaptureFile, m_MainWindow);
+
+    if(!QFile::exists(m_CaptureFile))
+    {
+      RDDialog::critical(m_MainWindow, tr("Failed to save capture"),
+                         tr("Capture couldn't be copied from remote."));
+      return;
+    }
+  }
 }

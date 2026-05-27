@@ -1,7 +1,7 @@
 /******************************************************************************
  * The MIT License (MIT)
  *
- * Copyright (c) 2019-2024 Baldur Karlsson
+ * Copyright (c) 2019-2026 Baldur Karlsson
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -372,6 +372,11 @@ struct DataType
   const Vector &vector() const { return basicType.vector; }
   const Matrix &matrix() const { return basicType; }
   Id InnerType() const { return pointerType.baseId; }
+  bool IsU32() const
+  {
+    return type == Type::ScalarType && basicType.vector.scalar.width == 32 &&
+           basicType.vector.scalar.type == Op::TypeInt && !basicType.vector.scalar.signedness;
+  }
   bool IsOpaqueType() const
   {
     switch(type)
@@ -532,6 +537,23 @@ struct Section
   };
 };
 
+enum class ThreadScope : uint32_t
+{
+  Thread = 0,
+  Quad = 0x1,
+  Subgroup = 0x2,
+  Workgroup = 0x4,
+};
+
+BITMASK_OPERATORS(ThreadScope);
+
+enum class ComputeDerivativeMode : uint8_t
+{
+  None,
+  Linear,
+  Quad,
+};
+
 class Processor
 {
 public:
@@ -545,6 +567,14 @@ public:
   const rdcarray<Variable> &GetGlobals() { return globals; }
   Id GetIDType(Id id) { return idTypes[id]; }
   DataType &GetDataType(Id id)
+  {
+    static DataType empty;
+    auto it = dataTypes.find(id);
+    if(it == dataTypes.end())
+      return empty;
+    return it->second;
+  }
+  const DataType &GetDataType(Id id) const
   {
     static DataType empty;
     auto it = dataTypes.find(id);
@@ -609,6 +639,7 @@ protected:
     ExtSet_GLSL450 = 0,
     ExtSet_Printf = 1,
     ExtSet_ShaderDbg = 2,
+    ExtSet_DebugBreak = 3,
     ExtSet_Count,
   };
 
@@ -622,6 +653,8 @@ protected:
   };
 
   LogicalSection m_Sections[Section::Count];
+
+  ThreadScope m_ThreadScope = ThreadScope::Thread;
 
 private:
   struct DeferredMemberDecoration

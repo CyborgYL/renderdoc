@@ -1,7 +1,7 @@
 /******************************************************************************
  * The MIT License (MIT)
  *
- * Copyright (c) 2019-2024 Baldur Karlsson
+ * Copyright (c) 2021-2026 Baldur Karlsson
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -23,6 +23,15 @@
  ******************************************************************************/
 
 #include "d3d12_test.h"
+
+MIDL_INTERFACE("52528c37-bfd9-4bbb-99ff-fdb7188619ce")
+IRenderDocDescriptorNamer : public IUnknown
+{
+public:
+  virtual HRESULT STDMETHODCALLTYPE SetName(UINT DescriptorIndex, LPCSTR Name) = 0;
+};
+
+COM_SMARTPTR(IRenderDocDescriptorNamer);
 
 RD_TEST(D3D12_Descriptor_Indexing, D3D12GraphicsTest)
 {
@@ -128,24 +137,25 @@ float4 main(v2f IN) : SV_Target0
 
       if(t.tex == 0)
       {
-        ret *= texArray1[t.binding].SampleLevel(sArray1[t.binding], uv.xy, 0);
-        ret *= texArray1[t.binding+1].SampleLevel(sArray1[t.binding+1], uv.xy, 0);
-        ret *= texArray1[t.binding+2].SampleLevel(sArray1[t.binding+2], uv.xy, 0);
+        ret += texArray1[t.binding].SampleLevel(sArray1[t.binding], uv.xy, 0);
+        ret += texArray1[t.binding+1].SampleLevel(sArray1[t.binding+1], uv.xy, 0);
+        ret += texArray1[t.binding+2].SampleLevel(sArray1[t.binding+2], uv.xy, 0);
       }
       else if(t.tex == 1)
       {
-        ret *= texArray2[t.binding].SampleLevel(s, uv.xy, 0);
-        ret *= texArray2[t.binding+10].SampleLevel(s, uv.xy, 0);
-        ret *= texArray2[20].SampleLevel(s, uv.xy, 0);
+        ret += texArray2[t.binding].SampleLevel(s, uv.xy, 0);
+        ret += texArray2[t.binding+10].SampleLevel(s, uv.xy, 0);
+        ret += texArray2[20].SampleLevel(s, uv.xy, 0);
       }
       else if(t.tex == 2)
       {
-        ret *= texArray3[t.binding].SampleLevel(s, uv.xy, 0);
+        ret += texArray3[t.binding].SampleLevel(s, uv.xy, 0);
       }
 
       uv *= 1.8f;
     }
 
+    ret /= 100.0f;
     return ret;
   }
 }
@@ -189,6 +199,9 @@ struct alias2
 float4 main(v2f IN) : SV_Target0
 {
   StructuredBuffer<tex_ref> buf = ResourceDescriptorHeap[8];
+  int ZERO = floor(IN.uv.x/(IN.uv.x+1.0e-6f));
+  int ONE = ZERO + 1;
+
   if(IN.uv.y < 0.1f)
   {
     SamplerState s = SamplerDescriptorHeap[0];
@@ -213,9 +226,9 @@ float4 main(v2f IN) : SV_Target0
         Texture2D<float4> tex1 = ResourceDescriptorHeap[t.binding];
         Texture2D<float4> tex2 = ResourceDescriptorHeap[t.binding+1];
         Texture2D<float4> tex3 = ResourceDescriptorHeap[t.binding+2];
-        ret *= tex1.SampleLevel(s1, uv.xy, 0);
-        ret *= tex2.SampleLevel(s2, uv.xy, 0);
-        ret *= tex3.SampleLevel(s3, uv.xy, 0);
+        ret += tex1.SampleLevel(s1, uv.xy, 0);
+        ret += tex2.SampleLevel(s2, uv.xy, 0);
+        ret += tex3.SampleLevel(s3, uv.xy, 0);
         RWStructuredBuffer<uint> uav = ResourceDescriptorHeap[10];
         uav[0] = t.binding;
       }
@@ -226,32 +239,33 @@ float4 main(v2f IN) : SV_Target0
         SamplerState s3 = SamplerDescriptorHeap[21];
         Texture2D<float4> tex1 = ResourceDescriptorHeap[40+t.binding];
         Texture2D<float4> tex2 = ResourceDescriptorHeap[40+t.binding+10];
-        ConstantBuffer<CBuffer> cbv = ResourceDescriptorHeap[9];
+        ConstantBuffer<CBuffer> cbv = ResourceDescriptorHeap[ONE*9];
         Texture2D<float4> tex3 = ResourceDescriptorHeap[cbv.tex_idx];
-        ret *= tex1.SampleLevel(s1, uv.xy, 0);
-        ret *= tex2.SampleLevel(s2, uv.xy, 0);
-        ret *= tex3.SampleLevel(s3, uv.xy, 0);
+        ret += tex1.SampleLevel(s1, uv.xy, 0);
+        ret += tex2.SampleLevel(s2, uv.xy, 0);
+        ret += tex3.SampleLevel(s3, uv.xy, 0);
       }
       else if(t.tex == 2)
       {
         SamplerState s = SamplerDescriptorHeap[25];
         Texture2D<float4> tex = ResourceDescriptorHeap[80+t.binding];
-        ret *= tex.SampleLevel(s, uv.xy, 0);
+        ret += tex.SampleLevel(s, uv.xy, 0);
       }
       else if(t.tex == 3)
       {
         StructuredBuffer<alias1> alias1buf = ResourceDescriptorHeap[150+t.binding];
-        ret *= alias1buf[0].Color;
+        ret += alias1buf[0].Color;
       }
       else if(t.tex == 4)
       {
         StructuredBuffer<alias2> alias2buf = ResourceDescriptorHeap[150+t.binding];
-        ret *= alias2buf[0].Color;
+        ret += alias2buf[0].Color;
       }
 
       uv *= 1.8f;
     }
 
+    ret /= 100.0f;
     return ret;
   }
 }
@@ -464,17 +478,31 @@ float4 main(v2f IN) : SV_Target0
     MakeSRV(alias1Buf).StructureStride(3 * sizeof(Vec4f)).CreateGPU(150 + 6);
     MakeSRV(alias2Buf).StructureStride(3 * sizeof(Vec4f)).CreateGPU(150 + 12);
 
+    IRenderDocDescriptorNamerPtr namer = m_CBVUAVSRV;
+
     MakeSRV(smiley).CreateGPU(12);
+    if(namer)
+      namer->SetName(12, "smiley");
     MakeSRV(smiley).CreateGPU(19);
+    if(namer)
+      namer->SetName(19, "another_smiley");
     MakeSRV(smiley).CreateGPU(20);
+    if(namer)
+      namer->SetName(20, "more_smileys???");
     MakeSRV(smiley).CreateGPU(21);
     MakeSRV(smiley).CreateGPU(49);
     MakeSRV(smiley).CreateGPU(59);
     MakeSRV(smiley).CreateGPU(60);
     MakeSRV(smiley).CreateGPU(99);
     MakeSRV(smiley).CreateGPU(103);
+    // index 6 is the resource index from constBuf
+    MakeSRV(smiley).CreateGPU(6);
     MakeCBV(constBuf).SizeBytes(256).CreateGPU(9);
+    if(namer)
+      namer->SetName(9, "constBuf");
     MakeUAV(outUAV).Format(DXGI_FORMAT_R32_UINT).CreateGPU(10);
+    if(namer)
+      namer->SetName(10, "outUAV");
 
     D3D12_SAMPLER_DESC samplerDesc = {};
     samplerDesc.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;

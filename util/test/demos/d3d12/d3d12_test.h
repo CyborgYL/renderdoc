@@ -1,7 +1,7 @@
 /******************************************************************************
  * The MIT License (MIT)
  *
- * Copyright (c) 2019-2024 Baldur Karlsson
+ * Copyright (c) 2018-2026 Baldur Karlsson
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -77,9 +77,18 @@ struct D3D12GraphicsTest : public GraphicsTest
     BufUAVType = 0xf00,
   };
 
+  enum CompileOptionFlags
+  {
+    None = 0,
+    SkipOptimise = 1 << 0,
+    Enable16BitTypes = 1 << 1,
+    SeparateDebug = 1 << 2,
+  };
+
   ID3DBlobPtr Compile(std::string src, std::string entry, std::string profile,
-                      bool skipoptimise = true);
+                      uint32_t compileOptions = CompileOptionFlags::SkipOptimise);
   void WriteBlob(std::string name, ID3DBlobPtr blob, bool compress);
+  void WriteBlob(std::string name, void *data, size_t size, bool compress);
 
   void SetBlobPath(std::string name, ID3DBlobPtr &blob);
   void SetBlobPath(std::string name, ID3D12DeviceChild *shader);
@@ -120,6 +129,11 @@ struct D3D12GraphicsTest : public GraphicsTest
     return D3D12ViewCreator(dev, m_CBVUAVSRV, NULL, ViewType::SRV, res);
   }
   template <typename T>
+  D3D12ViewCreator MakeAS(T res)
+  {
+    return D3D12ViewCreator(dev, m_CBVUAVSRV, NULL, ViewType::AS, res);
+  }
+  template <typename T>
   D3D12ViewCreator MakeRTV(T res)
   {
     return D3D12ViewCreator(dev, m_RTV, NULL, ViewType::RTV, res);
@@ -158,6 +172,7 @@ struct D3D12GraphicsTest : public GraphicsTest
                        D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after);
   void ResourceBarrier(ID3D12ResourcePtr res, D3D12_RESOURCE_STATES before,
                        D3D12_RESOURCE_STATES after);
+  void ResourceBarrier(ID3D12GraphicsCommandListPtr cmd);
 
   void IASetVertexBuffer(ID3D12GraphicsCommandListPtr cmd, ID3D12ResourcePtr vb, UINT stride,
                          UINT offset);
@@ -253,6 +268,7 @@ struct D3D12GraphicsTest : public GraphicsTest
   D3D12_FEATURE_DATA_D3D12_OPTIONS5 opts5 = {};
   D3D12_FEATURE_DATA_D3D12_OPTIONS6 opts6 = {};
   D3D12_FEATURE_DATA_D3D12_OPTIONS7 opts7 = {};
+  D3D12_FEATURE_DATA_D3D12_OPTIONS19 opts19 = {};
   D3D_SHADER_MODEL m_HighestShaderModel = D3D_SHADER_MODEL_5_1;
 
   ID3D12FencePtr m_GPUSyncFence;

@@ -1,7 +1,7 @@
 /******************************************************************************
  * The MIT License (MIT)
  *
- * Copyright (c) 2019-2024 Baldur Karlsson
+ * Copyright (c) 2015-2026 Baldur Karlsson
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -30,6 +30,7 @@
 #include "../vk_shader_cache.h"
 #include "api/replay/version.h"
 #include "core/settings.h"
+#include "driver/ihv/nv/nv_aftermath.h"
 #include "strings/string_utils.h"
 
 RDOC_CONFIG(
@@ -37,6 +38,9 @@ RDOC_CONFIG(
     "By default we have no choice but to replace VkApplicationInfo to safely work on all drivers. "
     "This behaviour can be disabled with this flag, which lets it through both during capture and "
     "on replay.");
+
+RDOC_CONFIG(bool, Vulkan_Debug_EnableGPUVA, false,
+            "Enable GPU Validation when enabling Vulkan validation.");
 
 // intercept and overwrite the application info if present. We must use the same appinfo on
 // capture and replay, and the safer default is not to replay as if we were the original app but
@@ -163,7 +167,7 @@ static void StripUnwantedExtensions(rdcarray<rdcstr> &Extensions)
     if(ext == "VK_KHR_xlib_surface" || ext == "VK_KHR_xcb_surface" ||
        ext == "VK_KHR_wayland_surface" || ext == "VK_KHR_mir_surface" ||
        ext == "VK_MVK_macos_surface" || ext == "VK_KHR_android_surface" ||
-       ext == "VK_KHR_win32_surface")
+       ext == "VK_KHR_win32_surface" || ext == "VK_EXT_headless_surface")
     {
       return true;
     }
@@ -182,7 +186,7 @@ static void StripUnwantedExtensions(rdcarray<rdcstr> &Extensions)
     if(ext == "VK_KHR_external_fence_fd" || ext == "VK_KHR_external_fence_win32" ||
        ext == "VK_KHR_external_memory_fd" || ext == "VK_KHR_external_memory_win32" ||
        ext == "VK_KHR_external_semaphore_fd" || ext == "VK_KHR_external_semaphore_win32" ||
-       ext == "VK_KHR_win32_keyed_mutex")
+       ext == "VK_KHR_win32_keyed_mutex" || ext == "VK_EXT_external_memory_dma_buf")
     {
       return true;
     }
@@ -190,12 +194,20 @@ static void StripUnwantedExtensions(rdcarray<rdcstr> &Extensions)
     // remove WSI-only extensions
     if(ext == "VK_GOOGLE_display_timing" || ext == "VK_KHR_display_swapchain" ||
        ext == "VK_EXT_display_control" || ext == "VK_KHR_present_id" ||
-       ext == "VK_KHR_present_wait" || ext == "VK_EXT_surface_maintenance1" ||
-       ext == "VK_EXT_swapchain_maintenance1" || ext == "VK_EXT_hdr_metadata")
+       ext == "VK_KHR_present_id2" || ext == "VK_KHR_present_wait" ||
+       ext == "VK_KHR_present_wait2" || ext == "VK_KHR_present_mode_fifo_latest_ready" ||
+       ext == "VK_EXT_present_mode_fifo_latest_ready" || ext == "VK_EXT_surface_maintenance1" ||
+       ext == "VK_EXT_swapchain_maintenance1" || ext == "VK_KHR_surface_maintenance1" ||
+       ext == "VK_KHR_swapchain_maintenance1" || ext == "VK_EXT_hdr_metadata" ||
+       ext == "VK_KHR_get_display_properties2")
       return true;
 
     // remove fullscreen exclusive extension
     if(ext == "VK_EXT_full_screen_exclusive")
+      return true;
+
+    // we do not replay any drm features
+    if(ext == "VK_EXT_image_drm_format_modifier")
       return true;
 
     // this is debug only, nothing to capture, so nothing to replay
@@ -313,9 +325,9 @@ RDResult WrappedVulkan::Initialise(VkInitParams &params, uint64_t sectionVersion
 
   AddRequiredExtensions(true, params.Extensions, supportedExtensions);
 
-  // after 1.0, VK_KHR_get_physical_device_properties2 is promoted to core, but enable it if it's
+  // after 1.1, VK_KHR_get_physical_device_properties2 is promoted to core, but enable it if it's
   // reported as available, just in case.
-  if(params.APIVersion >= VK_API_VERSION_1_0)
+  if(params.APIVersion >= VK_API_VERSION_1_1)
   {
     if(supportedExtensions.find(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME) !=
        supportedExtensions.end())
@@ -336,6 +348,17 @@ RDResult WrappedVulkan::Initialise(VkInitParams &params, uint64_t sectionVersion
     {
       if(!params.Extensions.contains(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME))
         params.Extensions.push_back(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
+    }
+  }
+
+  // enable device group extension if on 1.0, so we can use BDA. Shuts the validation layers up
+  if(params.APIVersion <= VK_API_VERSION_1_0)
+  {
+    if(supportedExtensions.find(VK_KHR_DEVICE_GROUP_CREATION_EXTENSION_NAME) !=
+       supportedExtensions.end())
+    {
+      if(!params.Extensions.contains(VK_KHR_DEVICE_GROUP_CREATION_EXTENSION_NAME))
+        params.Extensions.push_back(VK_KHR_DEVICE_GROUP_CREATION_EXTENSION_NAME);
     }
   }
 
@@ -371,9 +394,8 @@ RDResult WrappedVulkan::Initialise(VkInitParams &params, uint64_t sectionVersion
   featuresEXT.disabledValidationFeatureCount = ARRAY_COUNT(disableFeatures);
   featuresEXT.pDisabledValidationFeatures = disableFeatures;
 
-// enable this to get GPU-based validation, where available, whenever we enable API validation
-#if 0
-  if(m_ReplayOptions.apiValidation)
+  // enable this to get GPU-based validation, where available, whenever we enable API validation
+  if(m_ReplayOptions.apiValidation && Vulkan_Debug_EnableGPUVA())
   {
     VkValidationFeatureEnableEXT enableFeatures[] = {
         VK_VALIDATION_FEATURE_ENABLE_GPU_ASSISTED_EXT,
@@ -381,7 +403,6 @@ RDResult WrappedVulkan::Initialise(VkInitParams &params, uint64_t sectionVersion
     featuresEXT.enabledValidationFeatureCount = ARRAY_COUNT(enableFeatures);
     featuresEXT.pEnabledValidationFeatures = enableFeatures;
   }
-#endif
 
   VkValidationFlagsEXT flagsEXT = {VK_STRUCTURE_TYPE_VALIDATION_FLAGS_EXT};
   VkValidationCheckEXT disableChecks[] = {VK_VALIDATION_CHECK_SHADERS_EXT};
@@ -471,19 +492,13 @@ RDResult WrappedVulkan::Initialise(VkInitParams &params, uint64_t sectionVersion
 
   RDCASSERTEQUAL(ret, VK_SUCCESS);
 
-  GetResourceManager()->WrapResource(m_Instance, m_Instance);
+  GetResourceManager()->WrapResource(params.InstanceID, m_Instance, m_Instance);
 
   // we'll add the chunk later when we re-process it.
   if(params.InstanceID != ResourceId())
   {
-    GetResourceManager()->AddLiveResource(params.InstanceID, m_Instance);
-
     AddResource(params.InstanceID, ResourceType::Device, "Instance");
     GetReplay()->GetResourceDesc(params.InstanceID).initialisationChunks.clear();
-  }
-  else
-  {
-    GetResourceManager()->AddLiveResource(GetResID(m_Instance), m_Instance);
   }
 
   InitInstanceExtensionTables(m_Instance, &m_EnabledExtensions);
@@ -543,8 +558,11 @@ RDResult WrappedVulkan::Initialise(VkInitParams &params, uint64_t sectionVersion
             ->EnumeratePhysicalDevices(Unwrap(m_Instance), &count, &m_ReplayPhysicalDevices[0]);
   CHECK_VKR(this, vkr);
 
+  // these are only used internally, since due to physical device remapping the actual registered
+  // resource is created as a fake physical device and that's where we register them by their
+  // capture-time ID. These can safely be created with replay-only IDs.
   for(uint32_t i = 0; i < count; i++)
-    GetResourceManager()->WrapResource(m_Instance, m_ReplayPhysicalDevices[i]);
+    GetResourceManager()->WrapResource(ResourceId(), m_Instance, m_ReplayPhysicalDevices[i]);
 
 #if ENABLED(RDOC_WIN32)
   if(GetModuleHandleA("nvoglv64.dll"))
@@ -816,7 +834,7 @@ VkResult WrappedVulkan::vkCreateInstance(const VkInstanceCreateInfo *pCreateInfo
 
   InitInstanceTable(m_Instance, gpa);
 
-  GetResourceManager()->WrapResource(m_Instance, m_Instance);
+  GetResourceManager()->WrapResource(ResourceId(), m_Instance, m_Instance);
 
   *pInstance = m_Instance;
 
@@ -1014,6 +1032,7 @@ void WrappedVulkan::Shutdown()
   }
 
   FreeAllMemory(MemoryScope::InitialContents);
+  FreeAllMemory(MemoryScope::InitialContentsFirstApplyOnly);
 
   if(m_MemoryFreeThread)
   {
@@ -1028,7 +1047,12 @@ void WrappedVulkan::Shutdown()
   // destroy the physical devices manually because due to remapping the may have leftover
   // refcounts
   for(size_t i = 0; i < m_ReplayPhysicalDevices.size(); i++)
-    GetResourceManager()->ReleaseWrappedResource(m_ReplayPhysicalDevices[i]);
+  {
+    if(m_ReplayPhysicalDevices[i] != VK_NULL_HANDLE)
+      GetResourceManager()->ReleaseWrappedResource(m_ReplayPhysicalDevices[i]);
+  }
+
+  m_ASManager->Cleanup();
 
   m_Replay->DestroyResources();
 
@@ -1425,24 +1449,21 @@ bool WrappedVulkan::Serialise_vkEnumeratePhysicalDevices(SerialiserType &ser, Vk
 
     pd = m_ReplayPhysicalDevices[bestIdx];
 
+    // we want to preserve the separate physical devices until we actually need the real handle,
+    // so don't remap multiple capture-time physical devices to one replay-time physical device
+    // yet. See below in Serialise_vkCreateDevice where this is decoded.
+    // Note this allocation is pooled so we don't have to explicitly delete it.
     {
       VkPhysicalDevice fakeDevice = MakePhysicalDeviceHandleFromIndex(PhysicalDeviceIndex);
 
-      ResourceId id = ResourceIDGen::GetNewUniqueID();
-      WrappedVkPhysicalDevice *wrapped = new WrappedVkPhysicalDevice(fakeDevice, id);
+      WrappedVkPhysicalDevice *wrapped = new WrappedVkPhysicalDevice(fakeDevice, PhysicalDevice);
 
-      GetResourceManager()->AddCurrentResource(id, wrapped);
+      GetResourceManager()->AddResource(PhysicalDevice, wrapped);
 
       if(IsReplayMode(m_State))
         GetResourceManager()->AddWrapper(wrapped, ToTypedHandle(fakeDevice));
 
       fakeDevice = (VkPhysicalDevice)wrapped;
-
-      // we want to preserve the separate physical devices until we actually need the real handle,
-      // so don't remap multiple capture-time physical devices to one replay-time physical device
-      // yet. See below in Serialise_vkCreateDevice where this is decoded.
-      // Note this allocation is pooled so we don't have to explicitly delete it.
-      GetResourceManager()->AddLiveResource(PhysicalDevice, fakeDevice);
     }
 
     AddResource(PhysicalDevice, ResourceType::Device, "Physical Device");
@@ -1497,7 +1518,7 @@ VkResult WrappedVulkan::vkEnumeratePhysicalDevices(VkInstance instance,
     }
     else
     {
-      GetResourceManager()->WrapResource(instance, devices[i]);
+      GetResourceManager()->WrapResource(ResourceId(), instance, devices[i]);
 
       if(IsCaptureMode(m_State))
       {
@@ -1687,7 +1708,7 @@ bool WrappedVulkan::Serialise_vkCreateDevice(SerialiserType &ser, VkPhysicalDevi
   if(IsReplayingAndReading())
   {
     // kept around only to call DerivedResource below, as this is the resource that actually has an
-    // original resource ID.
+    // capture time resource ID.
     VkPhysicalDevice origPhysDevice = physicalDevice;
 
     // see above in Serialise_vkEnumeratePhysicalDevices where this is encoded
@@ -1711,14 +1732,14 @@ bool WrappedVulkan::Serialise_vkCreateDevice(SerialiserType &ser, VkPhysicalDevi
     m_PhysicalDeviceData.driverInfo =
         VkDriverInfo(m_PhysicalDeviceData.props, m_PhysicalDeviceData.driverProps, true);
 
-    rdcarray<VkDeviceQueueGlobalPriorityCreateInfoKHR *> queuePriorities;
+    rdcarray<VkDeviceQueueGlobalPriorityCreateInfo *> queuePriorities;
 
     for(uint32_t i = 0; i < CreateInfo.queueCreateInfoCount; i++)
     {
-      VkDeviceQueueGlobalPriorityCreateInfoKHR *queuePrio =
-          (VkDeviceQueueGlobalPriorityCreateInfoKHR *)FindNextStruct(
+      VkDeviceQueueGlobalPriorityCreateInfo *queuePrio =
+          (VkDeviceQueueGlobalPriorityCreateInfo *)FindNextStruct(
               &CreateInfo.pQueueCreateInfos[i],
-              VK_STRUCTURE_TYPE_DEVICE_QUEUE_GLOBAL_PRIORITY_CREATE_INFO_KHR);
+              VK_STRUCTURE_TYPE_DEVICE_QUEUE_GLOBAL_PRIORITY_CREATE_INFO);
 
       if(queuePrio)
         queuePriorities.push_back(queuePrio);
@@ -1759,6 +1780,9 @@ bool WrappedVulkan::Serialise_vkCreateDevice(SerialiserType &ser, VkPhysicalDevi
     }
 
     AddRequiredExtensions(false, Extensions, supportedExtensions);
+
+    VkPhysicalDeviceProperties physProps;
+    ObjDisp(physicalDevice)->GetPhysicalDeviceProperties(Unwrap(physicalDevice), &physProps);
 
     // Drop VK_KHR_driver_properties if it's not available, but add it if it is
     bool driverPropsSupported = (supportedExtensions.find(VK_KHR_DRIVER_PROPERTIES_EXTENSION_NAME) !=
@@ -1880,14 +1904,27 @@ bool WrappedVulkan::Serialise_vkCreateDevice(SerialiserType &ser, VkPhysicalDevi
     }
     else
     {
-      VkPhysicalDeviceMeshShaderFeaturesEXT *meshFeats =
-          (VkPhysicalDeviceMeshShaderFeaturesEXT *)FindNextStruct(
+      const VkPhysicalDeviceMeshShaderFeaturesEXT *meshFeats =
+          (const VkPhysicalDeviceMeshShaderFeaturesEXT *)FindNextStruct(
               &createInfo, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT);
 
       if(meshFeats && meshFeats->meshShader)
         RDCWARN(
             "VK_EXT_scalar_block_layout extension not available, mesh output from "
             "mesh stage will not be available");
+    }
+
+    // enable VK_KHR_shader_subgroup_uniform_control_flow if it's available, to make subgroup
+    // debugging more reliable/spec-clean.
+    // if we can't get it, we'll just emit the same code anyway and hope it compiles to something sensible
+    if(RDCMIN(m_EnabledExtensions.vulkanVersion, physProps.apiVersion) >= VK_MAKE_VERSION(1, 1, 0))
+    {
+      if(supportedExtensions.find(VK_KHR_SHADER_SUBGROUP_UNIFORM_CONTROL_FLOW_EXTENSION_NAME) !=
+         supportedExtensions.end())
+      {
+        Extensions.push_back(VK_KHR_SHADER_SUBGROUP_UNIFORM_CONTROL_FLOW_EXTENSION_NAME);
+        RDCLOG("Enabling VK_KHR_shader_subgroup_uniform_control_flow extension");
+      }
     }
 
     bool KHRbuffer = false, EXTbuffer = false;
@@ -1897,6 +1934,9 @@ bool WrappedVulkan::Serialise_vkCreateDevice(SerialiserType &ser, VkPhysicalDevi
     {
       Extensions.push_back(VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME);
       RDCLOG("Enabling VK_KHR_buffer_device_address");
+
+      if(!Extensions.contains(VK_KHR_DEVICE_GROUP_EXTENSION_NAME))
+        Extensions.push_back(VK_KHR_DEVICE_GROUP_EXTENSION_NAME);
 
       KHRbuffer = true;
     }
@@ -2207,14 +2247,20 @@ bool WrappedVulkan::Serialise_vkCreateDevice(SerialiserType &ser, VkPhysicalDevi
       RDCLOG("Removed VK_EXT_private_data structs from vkCreateDevice pNext chain");
     }
 
-    bool present_id = false;
-    present_id |=
+    bool present_exts = false;
+    present_exts |=
         RemoveNextStruct(&createInfo, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR);
-    present_id |=
+    present_exts |=
         RemoveNextStruct(&createInfo, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR);
-    if(present_id)
+    present_exts |=
+        RemoveNextStruct(&createInfo, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_2_FEATURES_KHR);
+    present_exts |=
+        RemoveNextStruct(&createInfo, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_2_FEATURES_KHR);
+    present_exts |= RemoveNextStruct(
+        &createInfo, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_MODE_FIFO_LATEST_READY_FEATURES_KHR);
+    if(present_exts)
     {
-      RDCLOG("Removed VK_KHR_present_id/wait structs from vkCreateDevice pNext chain");
+      RDCLOG("Removed VK_KHR_present_id/wait/latest_ready structs from vkCreateDevice pNext chain");
     }
 
     VkPhysicalDeviceFeatures enabledFeatures = {0};
@@ -2323,6 +2369,7 @@ bool WrappedVulkan::Serialise_vkCreateDevice(SerialiserType &ser, VkPhysicalDevi
     VkPhysicalDeviceDescriptorIndexingFeatures descIndexingFeatures = {};
     VkPhysicalDeviceVulkan12Features vulkan12Features = {};
     VkPhysicalDeviceVulkan13Features vulkan13Features = {};
+    VkPhysicalDeviceVulkan14Features vulkan14Features = {};
     VkPhysicalDeviceSynchronization2Features sync2 = {};
 
     if(ObjDisp(physicalDevice)->GetPhysicalDeviceFeatures2)
@@ -2342,6 +2389,20 @@ bool WrappedVulkan::Serialise_vkCreateDevice(SerialiserType &ser, VkPhysicalDevi
         CHECK_PHYS_EXT_FEATURE(protectedMemory);
         CHECK_PHYS_EXT_FEATURE(samplerYcbcrConversion);
         CHECK_PHYS_EXT_FEATURE(shaderDrawParameters);
+
+        m_MultiView |= ext->multiview != VK_FALSE;
+
+        if(m_MultiView)
+        {
+          if(avail.multiviewGeometryShader)
+            ext->multiviewGeometryShader = true;
+          else
+            RDCWARN(
+                "multiviewGeometryShader = false, triangle size overlay with multiview "
+                "unavailable");
+
+          m_MultiViewGeometryShaders |= ext->multiviewGeometryShader != VK_FALSE;
+        }
       }
       END_PHYS_EXT_CHECK();
 
@@ -2437,6 +2498,38 @@ bool WrappedVulkan::Serialise_vkCreateDevice(SerialiserType &ser, VkPhysicalDevi
       }
       END_PHYS_EXT_CHECK();
 
+      BEGIN_PHYS_EXT_CHECK(VkPhysicalDeviceVulkan14Features,
+                           VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES);
+      {
+        vulkan14Features = *ext;
+
+        CHECK_PHYS_EXT_FEATURE(globalPriorityQuery);
+        CHECK_PHYS_EXT_FEATURE(shaderSubgroupRotate);
+        CHECK_PHYS_EXT_FEATURE(shaderSubgroupRotateClustered);
+        CHECK_PHYS_EXT_FEATURE(shaderFloatControls2);
+        CHECK_PHYS_EXT_FEATURE(shaderExpectAssume);
+        CHECK_PHYS_EXT_FEATURE(rectangularLines);
+        CHECK_PHYS_EXT_FEATURE(bresenhamLines);
+        CHECK_PHYS_EXT_FEATURE(smoothLines);
+        CHECK_PHYS_EXT_FEATURE(stippledRectangularLines);
+        CHECK_PHYS_EXT_FEATURE(stippledBresenhamLines);
+        CHECK_PHYS_EXT_FEATURE(stippledSmoothLines);
+        CHECK_PHYS_EXT_FEATURE(vertexAttributeInstanceRateDivisor);
+        CHECK_PHYS_EXT_FEATURE(vertexAttributeInstanceRateZeroDivisor);
+        CHECK_PHYS_EXT_FEATURE(indexTypeUint8);
+        CHECK_PHYS_EXT_FEATURE(dynamicRenderingLocalRead);
+        CHECK_PHYS_EXT_FEATURE(maintenance5);
+        CHECK_PHYS_EXT_FEATURE(maintenance6);
+        CHECK_PHYS_EXT_FEATURE(pipelineProtectedAccess);
+        CHECK_PHYS_EXT_FEATURE(pipelineRobustness);
+        CHECK_PHYS_EXT_FEATURE(hostImageCopy);
+        CHECK_PHYS_EXT_FEATURE(pushDescriptor);
+
+        m_Maintenance5 |= ext->maintenance5 != VK_FALSE;
+        m_Maintenance6 |= ext->maintenance6 != VK_FALSE;
+      }
+      END_PHYS_EXT_CHECK();
+
       BEGIN_PHYS_EXT_CHECK(VkPhysicalDevice8BitStorageFeatures,
                            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_8BIT_STORAGE_FEATURES);
       {
@@ -2485,6 +2578,8 @@ bool WrappedVulkan::Serialise_vkCreateDevice(SerialiserType &ser, VkPhysicalDevi
         CHECK_PHYS_EXT_FEATURE(multiview);
         CHECK_PHYS_EXT_FEATURE(multiviewGeometryShader);
         CHECK_PHYS_EXT_FEATURE(multiviewTessellationShader);
+
+        m_MultiView |= ext->multiview != VK_FALSE;
       }
       END_PHYS_EXT_CHECK();
 
@@ -2505,10 +2600,18 @@ bool WrappedVulkan::Serialise_vkCreateDevice(SerialiserType &ser, VkPhysicalDevi
       END_PHYS_EXT_CHECK();
 
       BEGIN_PHYS_EXT_CHECK(
-          VkPhysicalDeviceFragmentDensityMapOffsetFeaturesQCOM,
-          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_DENSITY_MAP_OFFSET_FEATURES_QCOM);
+          VkPhysicalDeviceFragmentDensityMapOffsetFeaturesEXT,
+          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_DENSITY_MAP_OFFSET_FEATURES_EXT);
       {
         CHECK_PHYS_EXT_FEATURE(fragmentDensityMapOffset);
+      }
+      END_PHYS_EXT_CHECK();
+
+      BEGIN_PHYS_EXT_CHECK(
+          VkPhysicalDeviceFragmentDensityMapLayeredFeaturesVALVE,
+          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_DENSITY_MAP_LAYERED_FEATURES_VALVE);
+      {
+        CHECK_PHYS_EXT_FEATURE(fragmentDensityMapLayered);
       }
       END_PHYS_EXT_CHECK();
 
@@ -2556,7 +2659,7 @@ bool WrappedVulkan::Serialise_vkCreateDevice(SerialiserType &ser, VkPhysicalDevi
       }
       END_PHYS_EXT_CHECK();
 
-      BEGIN_PHYS_EXT_CHECK(VkPhysicalDeviceVariablePointerFeatures,
+      BEGIN_PHYS_EXT_CHECK(VkPhysicalDeviceVariablePointersFeatures,
                            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VARIABLE_POINTERS_FEATURES);
       {
         CHECK_PHYS_EXT_FEATURE(variablePointersStorageBuffer);
@@ -2564,11 +2667,19 @@ bool WrappedVulkan::Serialise_vkCreateDevice(SerialiserType &ser, VkPhysicalDevi
       }
       END_PHYS_EXT_CHECK();
 
-      BEGIN_PHYS_EXT_CHECK(VkPhysicalDeviceVertexAttributeDivisorFeaturesKHR,
-                           VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES_KHR);
+      BEGIN_PHYS_EXT_CHECK(VkPhysicalDeviceVertexAttributeDivisorFeatures,
+                           VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES);
       {
         CHECK_PHYS_EXT_FEATURE(vertexAttributeInstanceRateDivisor);
         CHECK_PHYS_EXT_FEATURE(vertexAttributeInstanceRateZeroDivisor);
+      }
+      END_PHYS_EXT_CHECK();
+
+      BEGIN_PHYS_EXT_CHECK(
+          VkPhysicalDeviceVertexAttributeRobustnessFeaturesEXT,
+          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_ROBUSTNESS_FEATURES_EXT);
+      {
+        CHECK_PHYS_EXT_FEATURE(vertexAttributeRobustness);
       }
       END_PHYS_EXT_CHECK();
 
@@ -2756,8 +2867,8 @@ bool WrappedVulkan::Serialise_vkCreateDevice(SerialiserType &ser, VkPhysicalDevi
       }
       END_PHYS_EXT_CHECK();
 
-      BEGIN_PHYS_EXT_CHECK(VkPhysicalDeviceIndexTypeUint8FeaturesKHR,
-                           VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_INDEX_TYPE_UINT8_FEATURES_KHR);
+      BEGIN_PHYS_EXT_CHECK(VkPhysicalDeviceIndexTypeUint8Features,
+                           VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_INDEX_TYPE_UINT8_FEATURES);
       {
         CHECK_PHYS_EXT_FEATURE(indexTypeUint8);
       }
@@ -2786,8 +2897,8 @@ bool WrappedVulkan::Serialise_vkCreateDevice(SerialiserType &ser, VkPhysicalDevi
       }
       END_PHYS_EXT_CHECK();
 
-      BEGIN_PHYS_EXT_CHECK(VkPhysicalDeviceLineRasterizationFeaturesEXT,
-                           VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_LINE_RASTERIZATION_FEATURES_EXT);
+      BEGIN_PHYS_EXT_CHECK(VkPhysicalDeviceLineRasterizationFeatures,
+                           VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_LINE_RASTERIZATION_FEATURES);
       {
         CHECK_PHYS_EXT_FEATURE(rectangularLines);
         CHECK_PHYS_EXT_FEATURE(bresenhamLines);
@@ -2802,6 +2913,14 @@ bool WrappedVulkan::Serialise_vkCreateDevice(SerialiserType &ser, VkPhysicalDevi
                            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_SUBGROUP_EXTENDED_TYPES_FEATURES);
       {
         CHECK_PHYS_EXT_FEATURE(shaderSubgroupExtendedTypes);
+      }
+      END_PHYS_EXT_CHECK();
+
+      BEGIN_PHYS_EXT_CHECK(VkPhysicalDeviceShaderSubgroupRotateFeatures,
+                           VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_SUBGROUP_ROTATE_FEATURES);
+      {
+        CHECK_PHYS_EXT_FEATURE(shaderSubgroupRotate);
+        CHECK_PHYS_EXT_FEATURE(shaderSubgroupRotateClustered);
       }
       END_PHYS_EXT_CHECK();
 
@@ -2839,6 +2958,13 @@ bool WrappedVulkan::Serialise_vkCreateDevice(SerialiserType &ser, VkPhysicalDevi
       {
         CHECK_PHYS_EXT_FEATURE(shaderFloat16);
         CHECK_PHYS_EXT_FEATURE(shaderInt8);
+      }
+      END_PHYS_EXT_CHECK();
+
+      BEGIN_PHYS_EXT_CHECK(VkPhysicalDeviceShaderFloatControls2Features,
+                           VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT_CONTROLS_2_FEATURES);
+      {
+        CHECK_PHYS_EXT_FEATURE(shaderFloatControls2);
       }
       END_PHYS_EXT_CHECK();
 
@@ -2882,8 +3008,8 @@ bool WrappedVulkan::Serialise_vkCreateDevice(SerialiserType &ser, VkPhysicalDevi
       }
       END_PHYS_EXT_CHECK();
 
-      BEGIN_PHYS_EXT_CHECK(VkPhysicalDeviceRobustness2FeaturesEXT,
-                           VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT);
+      BEGIN_PHYS_EXT_CHECK(VkPhysicalDeviceRobustness2FeaturesKHR,
+                           VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_KHR);
       {
         CHECK_PHYS_EXT_FEATURE(robustBufferAccess2);
         CHECK_PHYS_EXT_FEATURE(robustImageAccess2);
@@ -2901,8 +3027,8 @@ bool WrappedVulkan::Serialise_vkCreateDevice(SerialiserType &ser, VkPhysicalDevi
       }
       END_PHYS_EXT_CHECK();
 
-      BEGIN_PHYS_EXT_CHECK(VkPhysicalDeviceComputeShaderDerivativesFeaturesNV,
-                           VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COMPUTE_SHADER_DERIVATIVES_FEATURES_NV);
+      BEGIN_PHYS_EXT_CHECK(VkPhysicalDeviceComputeShaderDerivativesFeaturesKHR,
+                           VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COMPUTE_SHADER_DERIVATIVES_FEATURES_KHR);
       {
         CHECK_PHYS_EXT_FEATURE(computeDerivativeGroupQuads);
         CHECK_PHYS_EXT_FEATURE(computeDerivativeGroupLinear);
@@ -3040,8 +3166,8 @@ bool WrappedVulkan::Serialise_vkCreateDevice(SerialiserType &ser, VkPhysicalDevi
       }
       END_PHYS_EXT_CHECK();
 
-      BEGIN_PHYS_EXT_CHECK(VkPhysicalDeviceGlobalPriorityQueryFeaturesKHR,
-                           VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GLOBAL_PRIORITY_QUERY_FEATURES_KHR);
+      BEGIN_PHYS_EXT_CHECK(VkPhysicalDeviceGlobalPriorityQueryFeatures,
+                           VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GLOBAL_PRIORITY_QUERY_FEATURES);
       {
         CHECK_PHYS_EXT_FEATURE(globalPriorityQuery);
       }
@@ -3092,6 +3218,21 @@ bool WrappedVulkan::Serialise_vkCreateDevice(SerialiserType &ser, VkPhysicalDevi
       }
       END_PHYS_EXT_CHECK();
 
+      BEGIN_PHYS_EXT_CHECK(VkPhysicalDeviceDynamicRenderingLocalReadFeatures,
+                           VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_LOCAL_READ_FEATURES);
+      {
+        CHECK_PHYS_EXT_FEATURE(dynamicRenderingLocalRead);
+      }
+      END_PHYS_EXT_CHECK();
+
+      BEGIN_PHYS_EXT_CHECK(
+          VkPhysicalDeviceDynamicRenderingUnusedAttachmentsFeaturesEXT,
+          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_UNUSED_ATTACHMENTS_FEATURES_EXT);
+      {
+        CHECK_PHYS_EXT_FEATURE(dynamicRenderingUnusedAttachments);
+      }
+      END_PHYS_EXT_CHECK();
+
       BEGIN_PHYS_EXT_CHECK(VkPhysicalDevice4444FormatsFeaturesEXT,
                            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_4444_FORMATS_FEATURES_EXT);
       {
@@ -3135,8 +3276,8 @@ bool WrappedVulkan::Serialise_vkCreateDevice(SerialiserType &ser, VkPhysicalDevi
       }
       END_PHYS_EXT_CHECK();
 
-      BEGIN_PHYS_EXT_CHECK(VkPhysicalDeviceSwapchainMaintenance1FeaturesEXT,
-                           VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SWAPCHAIN_MAINTENANCE_1_FEATURES_EXT);
+      BEGIN_PHYS_EXT_CHECK(VkPhysicalDeviceSwapchainMaintenance1FeaturesKHR,
+                           VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SWAPCHAIN_MAINTENANCE_1_FEATURES_KHR);
       {
         CHECK_PHYS_EXT_FEATURE(swapchainMaintenance1);
       }
@@ -3157,8 +3298,8 @@ bool WrappedVulkan::Serialise_vkCreateDevice(SerialiserType &ser, VkPhysicalDevi
       }
       END_PHYS_EXT_CHECK();
 
-      BEGIN_PHYS_EXT_CHECK(VkPhysicalDeviceDepthClampZeroOneFeaturesEXT,
-                           VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_CLAMP_ZERO_ONE_FEATURES_EXT);
+      BEGIN_PHYS_EXT_CHECK(VkPhysicalDeviceDepthClampZeroOneFeaturesKHR,
+                           VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_CLAMP_ZERO_ONE_FEATURES_KHR);
       {
         CHECK_PHYS_EXT_FEATURE(depthClampZeroOne);
       }
@@ -3338,6 +3479,28 @@ bool WrappedVulkan::Serialise_vkCreateDevice(SerialiserType &ser, VkPhysicalDevi
       }
       END_PHYS_EXT_CHECK();
 
+      BEGIN_PHYS_EXT_CHECK(VkPhysicalDeviceShaderExpectAssumeFeatures,
+                           VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_EXPECT_ASSUME_FEATURES);
+      {
+        CHECK_PHYS_EXT_FEATURE(shaderExpectAssume);
+      }
+      END_PHYS_EXT_CHECK();
+
+      BEGIN_PHYS_EXT_CHECK(
+          VkPhysicalDeviceShaderMaximalReconvergenceFeaturesKHR,
+          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_MAXIMAL_RECONVERGENCE_FEATURES_KHR);
+      {
+        CHECK_PHYS_EXT_FEATURE(shaderMaximalReconvergence);
+      }
+      END_PHYS_EXT_CHECK();
+
+      BEGIN_PHYS_EXT_CHECK(VkPhysicalDeviceShaderQuadControlFeaturesKHR,
+                           VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_QUAD_CONTROL_FEATURES_KHR);
+      {
+        CHECK_PHYS_EXT_FEATURE(shaderQuadControl);
+      }
+      END_PHYS_EXT_CHECK();
+
       BEGIN_PHYS_EXT_CHECK(VkPhysicalDeviceRayTracingPipelineFeaturesKHR,
                            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR);
       {
@@ -3347,13 +3510,160 @@ bool WrappedVulkan::Serialise_vkCreateDevice(SerialiserType &ser, VkPhysicalDevi
         CHECK_PHYS_EXT_FEATURE(rayTracingPipelineTraceRaysIndirect);
         CHECK_PHYS_EXT_FEATURE(rayTraversalPrimitiveCulling);
 
-        VkPhysicalDeviceRayTracingPipelinePropertiesKHR rayProps = {
-            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR,
-        };
+        if(ext->rayTracingPipeline && !avail.rayTracingPipelineShaderGroupHandleCaptureReplay)
+        {
+          SET_ERROR_RESULT(m_FailedReplayResult, ResultCode::APIHardwareUnsupported,
+                           "Capture requires rayTracingPipeline support, which is available, but "
+                           "rayTracingPipelineShaderGroupHandleCaptureReplay support is not "
+                           "available which is required to replay\n"
+                           "\n%s",
+                           GetPhysDeviceCompatString(false, false).c_str());
+          return false;
+        }
+        if(ext->rayTracingPipeline)
+          ext->rayTracingPipelineShaderGroupHandleCaptureReplay = VK_TRUE;
+      }
+      END_PHYS_EXT_CHECK();
 
-        VkPhysicalDeviceProperties2 availPropsBase = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
-        availPropsBase.pNext = &rayProps;
-        ObjDisp(physicalDevice)->GetPhysicalDeviceProperties2(Unwrap(physicalDevice), &availPropsBase);
+      BEGIN_PHYS_EXT_CHECK(VkPhysicalDeviceRayTracingMaintenance1FeaturesKHR,
+                           VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_MAINTENANCE_1_FEATURES_KHR);
+      {
+        CHECK_PHYS_EXT_FEATURE(rayTracingMaintenance1);
+        CHECK_PHYS_EXT_FEATURE(rayTracingPipelineTraceRaysIndirect2);
+      }
+      END_PHYS_EXT_CHECK();
+
+      BEGIN_PHYS_EXT_CHECK(VkPhysicalDeviceRayTracingPositionFetchFeaturesKHR,
+                           VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_POSITION_FETCH_FEATURES_KHR);
+      {
+        CHECK_PHYS_EXT_FEATURE(rayTracingPositionFetch);
+      }
+      END_PHYS_EXT_CHECK();
+
+      BEGIN_PHYS_EXT_CHECK(VkPhysicalDeviceMaintenance5Features,
+                           VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_5_FEATURES);
+      {
+        CHECK_PHYS_EXT_FEATURE(maintenance5);
+        m_Maintenance5 |= ext->maintenance5 != VK_FALSE;
+      }
+      END_PHYS_EXT_CHECK();
+
+      BEGIN_PHYS_EXT_CHECK(VkPhysicalDeviceImageCompressionControlFeaturesEXT,
+                           VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_COMPRESSION_CONTROL_FEATURES_EXT);
+      {
+        CHECK_PHYS_EXT_FEATURE(imageCompressionControl);
+      }
+      END_PHYS_EXT_CHECK();
+
+      BEGIN_PHYS_EXT_CHECK(
+          VkPhysicalDeviceImageCompressionControlSwapchainFeaturesEXT,
+          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_COMPRESSION_CONTROL_SWAPCHAIN_FEATURES_EXT);
+      {
+        CHECK_PHYS_EXT_FEATURE(imageCompressionControlSwapchain);
+      }
+      END_PHYS_EXT_CHECK();
+
+      BEGIN_PHYS_EXT_CHECK(VkPhysicalDeviceDescriptorBufferFeaturesEXT,
+                           VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_BUFFER_FEATURES_EXT);
+      {
+        CHECK_PHYS_EXT_FEATURE(descriptorBuffer);
+        CHECK_PHYS_EXT_FEATURE(descriptorBufferCaptureReplay);
+        CHECK_PHYS_EXT_FEATURE(descriptorBufferImageLayoutIgnored);
+        CHECK_PHYS_EXT_FEATURE(descriptorBufferPushDescriptors);
+
+        if(ext->descriptorBuffer && !avail.descriptorBufferCaptureReplay)
+        {
+          SET_ERROR_RESULT(m_FailedReplayResult, ResultCode::APIHardwareUnsupported,
+                           "Capture requires descriptorBuffer support, which is available, but "
+                           "descriptorBufferCaptureReplay support is not "
+                           "available which is required to replay\n"
+                           "\n%s",
+                           GetPhysDeviceCompatString(false, false).c_str());
+          return false;
+        }
+        if(ext->descriptorBuffer)
+          ext->descriptorBufferCaptureReplay = VK_TRUE;
+
+        // enable the imageLayoutIgnored feature if available
+        if(avail.descriptorBufferImageLayoutIgnored)
+          ext->descriptorBufferImageLayoutIgnored = VK_TRUE;
+      }
+      END_PHYS_EXT_CHECK();
+
+      BEGIN_PHYS_EXT_CHECK(VkPhysicalDeviceShaderBfloat16FeaturesKHR,
+                           VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_BFLOAT16_FEATURES_KHR);
+      {
+        CHECK_PHYS_EXT_FEATURE(shaderBFloat16Type);
+        CHECK_PHYS_EXT_FEATURE(shaderBFloat16DotProduct);
+        CHECK_PHYS_EXT_FEATURE(shaderBFloat16CooperativeMatrix);
+      }
+      END_PHYS_EXT_CHECK();
+
+      BEGIN_PHYS_EXT_CHECK(VkPhysicalDeviceUnifiedImageLayoutsFeaturesKHR,
+                           VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_UNIFIED_IMAGE_LAYOUTS_FEATURES_KHR);
+      {
+        CHECK_PHYS_EXT_FEATURE(unifiedImageLayouts);
+        CHECK_PHYS_EXT_FEATURE(unifiedImageLayoutsVideo);
+      }
+      END_PHYS_EXT_CHECK();
+
+      BEGIN_PHYS_EXT_CHECK(VkPhysicalDeviceMaintenance6Features,
+                           VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_6_FEATURES);
+      {
+        CHECK_PHYS_EXT_FEATURE(maintenance6);
+        m_Maintenance6 |= ext->maintenance6 != VK_FALSE;
+      }
+      END_PHYS_EXT_CHECK();
+
+      BEGIN_PHYS_EXT_CHECK(VkPhysicalDeviceMaintenance7FeaturesKHR,
+                           VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_7_FEATURES_KHR);
+      {
+        CHECK_PHYS_EXT_FEATURE(maintenance7);
+      }
+      END_PHYS_EXT_CHECK();
+
+      BEGIN_PHYS_EXT_CHECK(VkPhysicalDeviceMaintenance8FeaturesKHR,
+                           VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_8_FEATURES_KHR);
+      {
+        CHECK_PHYS_EXT_FEATURE(maintenance8);
+      }
+      END_PHYS_EXT_CHECK();
+
+      BEGIN_PHYS_EXT_CHECK(VkPhysicalDeviceMaintenance9FeaturesKHR,
+                           VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_9_FEATURES_KHR);
+      {
+        CHECK_PHYS_EXT_FEATURE(maintenance9);
+        m_Maintenance9 |= ext->maintenance9 != VK_FALSE;
+      }
+      END_PHYS_EXT_CHECK();
+
+      BEGIN_PHYS_EXT_CHECK(VkPhysicalDevicePipelineRobustnessFeatures,
+                           VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_ROBUSTNESS_FEATURES);
+      {
+        CHECK_PHYS_EXT_FEATURE(pipelineRobustness);
+      }
+      END_PHYS_EXT_CHECK();
+
+      BEGIN_PHYS_EXT_CHECK(VkPhysicalDevicePipelineProtectedAccessFeatures,
+                           VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_PROTECTED_ACCESS_FEATURES);
+      {
+        CHECK_PHYS_EXT_FEATURE(pipelineProtectedAccess);
+      }
+      END_PHYS_EXT_CHECK();
+
+      BEGIN_PHYS_EXT_CHECK(VkPhysicalDeviceHostImageCopyFeatures,
+                           VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_IMAGE_COPY_FEATURES);
+      {
+        CHECK_PHYS_EXT_FEATURE(hostImageCopy);
+      }
+      END_PHYS_EXT_CHECK();
+
+      BEGIN_PHYS_EXT_CHECK(
+          VkPhysicalDeviceMultiviewPerViewViewportsFeaturesQCOM,
+          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_PER_VIEW_VIEWPORTS_FEATURES_QCOM);
+      {
+        CHECK_PHYS_EXT_FEATURE(multiviewPerViewViewports);
+        m_MultiviewPerViewViewports |= ext->multiviewPerViewViewports != VK_FALSE;
       }
       END_PHYS_EXT_CHECK();
     }
@@ -3516,9 +3826,6 @@ bool WrappedVulkan::Serialise_vkCreateDevice(SerialiserType &ser, VkPhysicalDevi
 
     SAFE_DELETE_ARRAY(exts);
 
-    VkPhysicalDeviceProperties physProps;
-    ObjDisp(physicalDevice)->GetPhysicalDeviceProperties(Unwrap(physicalDevice), &physProps);
-
     VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR pipeExecFeatures = {
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR,
     };
@@ -3643,8 +3950,8 @@ bool WrappedVulkan::Serialise_vkCreateDevice(SerialiserType &ser, VkPhysicalDevi
       }
     }
 
-    VkPhysicalDeviceScalarBlockLayoutFeaturesEXT scalarBlockEXTFeatures = {
-        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SCALAR_BLOCK_LAYOUT_FEATURES_EXT,
+    VkPhysicalDeviceScalarBlockLayoutFeatures scalarBlockFeatures = {
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SCALAR_BLOCK_LAYOUT_FEATURES,
     };
 
     if(RDCMIN(m_EnabledExtensions.vulkanVersion, physProps.apiVersion) >= VK_MAKE_VERSION(1, 2, 0))
@@ -3668,9 +3975,9 @@ bool WrappedVulkan::Serialise_vkCreateDevice(SerialiserType &ser, VkPhysicalDevi
         }
         else
         {
-          VkPhysicalDeviceScalarBlockLayoutFeaturesEXT *existingEXT =
-              (VkPhysicalDeviceScalarBlockLayoutFeaturesEXT *)FindNextStruct(
-                  &createInfo, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SCALAR_BLOCK_LAYOUT_FEATURES_EXT);
+          VkPhysicalDeviceScalarBlockLayoutFeatures *existingEXT =
+              (VkPhysicalDeviceScalarBlockLayoutFeatures *)FindNextStruct(
+                  &createInfo, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SCALAR_BLOCK_LAYOUT_FEATURES);
 
           if(existingEXT)
           {
@@ -3681,18 +3988,18 @@ bool WrappedVulkan::Serialise_vkCreateDevice(SerialiserType &ser, VkPhysicalDevi
             // don't add a new VkPhysicalDeviceVulkan12Features to the pNext chain because if we do
             // we have to remove any components etc. Instead just add the individual
             // VkPhysicalDeviceScalarBlockLayoutFeaturesEXT
-            scalarBlockEXTFeatures.scalarBlockLayout = VK_TRUE;
+            scalarBlockFeatures.scalarBlockLayout = VK_TRUE;
 
-            scalarBlockEXTFeatures.pNext = (void *)createInfo.pNext;
-            createInfo.pNext = &scalarBlockEXTFeatures;
+            scalarBlockFeatures.pNext = (void *)createInfo.pNext;
+            createInfo.pNext = &scalarBlockFeatures;
           }
         }
       }
     }
     else if(scalarBlock)
     {
-      VkPhysicalDeviceScalarBlockLayoutFeaturesEXT scalarAvail = {
-          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SCALAR_BLOCK_LAYOUT_FEATURES_EXT,
+      VkPhysicalDeviceScalarBlockLayoutFeatures scalarAvail = {
+          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SCALAR_BLOCK_LAYOUT_FEATURES,
       };
       VkPhysicalDeviceFeatures2 availBase = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
       availBase.pNext = &scalarAvail;
@@ -3701,9 +4008,9 @@ bool WrappedVulkan::Serialise_vkCreateDevice(SerialiserType &ser, VkPhysicalDevi
       if(scalarAvail.scalarBlockLayout)
       {
         // see if there's an existing struct
-        VkPhysicalDeviceScalarBlockLayoutFeaturesEXT *existing =
-            (VkPhysicalDeviceScalarBlockLayoutFeaturesEXT *)FindNextStruct(
-                &createInfo, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SCALAR_BLOCK_LAYOUT_FEATURES_EXT);
+        VkPhysicalDeviceScalarBlockLayoutFeatures *existing =
+            (VkPhysicalDeviceScalarBlockLayoutFeatures *)FindNextStruct(
+                &createInfo, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SCALAR_BLOCK_LAYOUT_FEATURES);
 
         if(existing)
         {
@@ -3712,10 +4019,10 @@ bool WrappedVulkan::Serialise_vkCreateDevice(SerialiserType &ser, VkPhysicalDevi
         else
         {
           // otherwise, add our own, and push it onto the pNext array
-          scalarBlockEXTFeatures.scalarBlockLayout = VK_TRUE;
+          scalarBlockFeatures.scalarBlockLayout = VK_TRUE;
 
-          scalarBlockEXTFeatures.pNext = (void *)createInfo.pNext;
-          createInfo.pNext = &scalarBlockEXTFeatures;
+          scalarBlockFeatures.pNext = (void *)createInfo.pNext;
+          createInfo.pNext = &scalarBlockFeatures;
         }
       }
       else
@@ -3731,8 +4038,8 @@ bool WrappedVulkan::Serialise_vkCreateDevice(SerialiserType &ser, VkPhysicalDevi
     VkPhysicalDeviceBufferDeviceAddressFeaturesEXT bufAddrEXTFeatures = {
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES_EXT,
     };
-    VkPhysicalDeviceBufferDeviceAddressFeaturesKHR bufAddrKHRFeatures = {
-        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES_KHR,
+    VkPhysicalDeviceBufferDeviceAddressFeatures bufAddrFeatures = {
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES,
     };
 
     if(RDCMIN(m_EnabledExtensions.vulkanVersion, physProps.apiVersion) >= VK_MAKE_VERSION(1, 3, 0))
@@ -3767,9 +4074,9 @@ bool WrappedVulkan::Serialise_vkCreateDevice(SerialiserType &ser, VkPhysicalDevi
         }
         else
         {
-          VkPhysicalDeviceBufferDeviceAddressFeaturesKHR *existingKHR =
-              (VkPhysicalDeviceBufferDeviceAddressFeaturesKHR *)FindNextStruct(
-                  &createInfo, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES_KHR);
+          VkPhysicalDeviceBufferDeviceAddressFeatures *existingKHR =
+              (VkPhysicalDeviceBufferDeviceAddressFeatures *)FindNextStruct(
+                  &createInfo, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES);
           VkPhysicalDeviceBufferDeviceAddressFeaturesEXT *existingEXT =
               (VkPhysicalDeviceBufferDeviceAddressFeaturesEXT *)FindNextStruct(
                   &createInfo, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES_EXT);
@@ -3791,11 +4098,11 @@ bool WrappedVulkan::Serialise_vkCreateDevice(SerialiserType &ser, VkPhysicalDevi
             // don't add a new VkPhysicalDeviceVulkan12Features to the pNext chain because if we do
             // we have to remove any components etc. Instead just add the individual
             // VkPhysicalDeviceBufferDeviceAddressFeaturesKHR
-            bufAddrKHRFeatures.bufferDeviceAddress = VK_TRUE;
-            bufAddrKHRFeatures.bufferDeviceAddressMultiDevice = VK_FALSE;
+            bufAddrFeatures.bufferDeviceAddress = VK_TRUE;
+            bufAddrFeatures.bufferDeviceAddressMultiDevice = VK_FALSE;
 
-            bufAddrKHRFeatures.pNext = (void *)createInfo.pNext;
-            createInfo.pNext = &bufAddrKHRFeatures;
+            bufAddrFeatures.pNext = (void *)createInfo.pNext;
+            createInfo.pNext = &bufAddrFeatures;
           }
         }
       }
@@ -3803,15 +4110,15 @@ bool WrappedVulkan::Serialise_vkCreateDevice(SerialiserType &ser, VkPhysicalDevi
     else if(KHRbuffer)
     {
       VkPhysicalDeviceFeatures2 availBase = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
-      availBase.pNext = &bufAddrKHRFeatures;
+      availBase.pNext = &bufAddrFeatures;
       ObjDisp(physicalDevice)->GetPhysicalDeviceFeatures2(Unwrap(physicalDevice), &availBase);
 
-      if(bufAddrKHRFeatures.bufferDeviceAddress)
+      if(bufAddrFeatures.bufferDeviceAddress)
       {
         // see if there's an existing struct
-        VkPhysicalDeviceBufferDeviceAddressFeaturesKHR *existing =
-            (VkPhysicalDeviceBufferDeviceAddressFeaturesKHR *)FindNextStruct(
-                &createInfo, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES_KHR);
+        VkPhysicalDeviceBufferDeviceAddressFeatures *existing =
+            (VkPhysicalDeviceBufferDeviceAddressFeatures *)FindNextStruct(
+                &createInfo, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES);
 
         if(existing)
         {
@@ -3823,11 +4130,11 @@ bool WrappedVulkan::Serialise_vkCreateDevice(SerialiserType &ser, VkPhysicalDevi
         else
         {
           // otherwise, add our own, and push it onto the pNext array
-          bufAddrKHRFeatures.bufferDeviceAddress = VK_TRUE;
-          bufAddrKHRFeatures.bufferDeviceAddressMultiDevice = VK_FALSE;
+          bufAddrFeatures.bufferDeviceAddress = VK_TRUE;
+          bufAddrFeatures.bufferDeviceAddressMultiDevice = VK_FALSE;
 
-          bufAddrKHRFeatures.pNext = (void *)createInfo.pNext;
-          createInfo.pNext = &bufAddrKHRFeatures;
+          bufAddrFeatures.pNext = (void *)createInfo.pNext;
+          createInfo.pNext = &bufAddrFeatures;
         }
       }
       else
@@ -3888,14 +4195,6 @@ bool WrappedVulkan::Serialise_vkCreateDevice(SerialiserType &ser, VkPhysicalDevi
     createInfo.enabledLayerCount = 0;
     createInfo.ppEnabledLayerNames = NULL;
 
-    rdcarray<const char *> extArray;
-    extArray.resize(Extensions.size());
-    for(size_t i = 0; i < Extensions.size(); i++)
-      extArray[i] = Extensions[i].c_str();
-
-    createInfo.enabledExtensionCount = (uint32_t)extArray.size();
-    createInfo.ppEnabledExtensionNames = extArray.data();
-
     byte *tempMem = GetTempMemory(GetNextPatchSize(createInfo.pNext));
 
     UnwrapNextChain(m_State, "VkDeviceCreateInfo", tempMem, (VkBaseInStructure *)&createInfo);
@@ -3911,6 +4210,17 @@ bool WrappedVulkan::Serialise_vkCreateDevice(SerialiserType &ser, VkPhysicalDevi
         physDevs[i] = Unwrap(m_PhysicalDevices[GetPhysicalDeviceIndexFromHandle(physDevs[i])]);
     }
 
+    NVAftermath_Init();
+    NVAftermath_EnableVK(supportedExtensions, Extensions, &createInfo.pNext);
+
+    rdcarray<const char *> extArray;
+    extArray.resize(Extensions.size());
+    for(size_t i = 0; i < Extensions.size(); i++)
+      extArray[i] = Extensions[i].c_str();
+
+    createInfo.enabledExtensionCount = (uint32_t)extArray.size();
+    createInfo.ppEnabledExtensionNames = extArray.data();
+
     vkr = GetDeviceDispatchTable(NULL)->CreateDevice(Unwrap(physicalDevice), &createInfo, NULL,
                                                      &device);
 
@@ -3918,11 +4228,11 @@ bool WrappedVulkan::Serialise_vkCreateDevice(SerialiserType &ser, VkPhysicalDevi
     {
       RDCWARN("Failed to create logical device: %s. Reducing queue priorities", ToStr(vkr).c_str());
 
-      for(VkDeviceQueueGlobalPriorityCreateInfoKHR *q : queuePriorities)
+      for(VkDeviceQueueGlobalPriorityCreateInfo *q : queuePriorities)
       {
         // medium is considered the default if no priority is set otherwise
-        if(q->globalPriority > VK_QUEUE_GLOBAL_PRIORITY_MEDIUM_EXT)
-          q->globalPriority = VK_QUEUE_GLOBAL_PRIORITY_MEDIUM_EXT;
+        if(q->globalPriority > VK_QUEUE_GLOBAL_PRIORITY_MEDIUM)
+          q->globalPriority = VK_QUEUE_GLOBAL_PRIORITY_MEDIUM;
       }
 
       vkr = GetDeviceDispatchTable(NULL)->CreateDevice(Unwrap(physicalDevice), &createInfo, NULL,
@@ -3936,8 +4246,7 @@ bool WrappedVulkan::Serialise_vkCreateDevice(SerialiserType &ser, VkPhysicalDevi
       return false;
     }
 
-    GetResourceManager()->WrapResource(device, device);
-    GetResourceManager()->AddLiveResource(Device, device);
+    GetResourceManager()->WrapResource(Device, device, device);
 
     AddResource(Device, ResourceType::Device, "Device");
     DerivedResource(origPhysDevice, Device);
@@ -4037,7 +4346,7 @@ bool WrappedVulkan::Serialise_vkCreateDevice(SerialiserType &ser, VkPhysicalDevi
                                                &m_InternalCmds.cmdpool);
       CHECK_VKR(this, vkr);
 
-      GetResourceManager()->WrapResource(Unwrap(device), m_InternalCmds.cmdpool);
+      GetResourceManager()->WrapResource(ResourceId(), Unwrap(device), m_InternalCmds.cmdpool);
     }
 
     // for each queue family we've remapped to, ensure we have a command pool and command buffer on
@@ -4047,6 +4356,11 @@ bool WrappedVulkan::Serialise_vkCreateDevice(SerialiserType &ser, VkPhysicalDevi
     {
       uint32_t qidx = createInfo.pQueueCreateInfos[i].queueFamilyIndex;
       m_ExternalQueues.resize(RDCMAX((uint32_t)m_ExternalQueues.size(), qidx + 1));
+
+      // Resize also the image barriers, as ImageBarrierSequence::SetMaxQueueFamilyIndex
+      // just sets the static MaxQueueFamilyIndex
+      m_setupImageBarriers.ResizeForMaxQueueFamilyIndex(qidx);
+      m_cleanupImageBarriers.ResizeForMaxQueueFamilyIndex(qidx);
 
       ImageBarrierSequence::SetMaxQueueFamilyIndex(qidx);
 
@@ -4060,7 +4374,7 @@ bool WrappedVulkan::Serialise_vkCreateDevice(SerialiserType &ser, VkPhysicalDevi
                                                &m_ExternalQueues[qidx].pool);
       CHECK_VKR(this, vkr);
 
-      GetResourceManager()->WrapResource(Unwrap(device), m_ExternalQueues[qidx].pool);
+      GetResourceManager()->WrapResource(ResourceId(), Unwrap(device), m_ExternalQueues[qidx].pool);
 
       VkCommandBufferAllocateInfo cmdInfo = {
           VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
@@ -4085,7 +4399,8 @@ bool WrappedVulkan::Serialise_vkCreateDevice(SerialiserType &ser, VkPhysicalDevi
         else
           SetDispatchTableOverMagicNumber(device, m_ExternalQueues[qidx].ring[x].acquire);
 
-        GetResourceManager()->WrapResource(Unwrap(device), m_ExternalQueues[qidx].ring[x].acquire);
+        GetResourceManager()->WrapResource(ResourceId(), Unwrap(device),
+                                           m_ExternalQueues[qidx].ring[x].acquire);
 
         vkr = ObjDisp(device)->AllocateCommandBuffers(Unwrap(device), &cmdInfo,
                                                       &m_ExternalQueues[qidx].ring[x].release);
@@ -4096,31 +4411,109 @@ bool WrappedVulkan::Serialise_vkCreateDevice(SerialiserType &ser, VkPhysicalDevi
         else
           SetDispatchTableOverMagicNumber(device, m_ExternalQueues[qidx].ring[x].release);
 
-        GetResourceManager()->WrapResource(Unwrap(device), m_ExternalQueues[qidx].ring[x].release);
+        GetResourceManager()->WrapResource(ResourceId(), Unwrap(device),
+                                           m_ExternalQueues[qidx].ring[x].release);
 
         vkr = ObjDisp(device)->CreateSemaphore(Unwrap(device), &semInfo, NULL,
                                                &m_ExternalQueues[qidx].ring[x].fromext);
         CHECK_VKR(this, vkr);
 
-        GetResourceManager()->WrapResource(Unwrap(device), m_ExternalQueues[qidx].ring[x].fromext);
+        GetResourceManager()->WrapResource(ResourceId(), Unwrap(device),
+                                           m_ExternalQueues[qidx].ring[x].fromext);
 
         vkr = ObjDisp(device)->CreateSemaphore(Unwrap(device), &semInfo, NULL,
                                                &m_ExternalQueues[qidx].ring[x].toext);
         CHECK_VKR(this, vkr);
 
-        GetResourceManager()->WrapResource(Unwrap(device), m_ExternalQueues[qidx].ring[x].toext);
+        GetResourceManager()->WrapResource(ResourceId(), Unwrap(device),
+                                           m_ExternalQueues[qidx].ring[x].toext);
 
         vkr = ObjDisp(device)->CreateFence(Unwrap(device), &fenceInfo, NULL,
                                            &m_ExternalQueues[qidx].ring[x].fence);
         CHECK_VKR(this, vkr);
 
-        GetResourceManager()->WrapResource(Unwrap(device), m_ExternalQueues[qidx].ring[x].fence);
+        GetResourceManager()->WrapResource(ResourceId(), Unwrap(device),
+                                           m_ExternalQueues[qidx].ring[x].fence);
       }
     }
 
     m_Replay->SetDriverInformation(m_PhysicalDeviceData.props, m_PhysicalDeviceData.driverProps);
 
     m_PhysicalDeviceData.enabledFeatures = enabledFeatures;
+
+    const VkPhysicalDeviceDescriptorBufferFeaturesEXT *descBufFeats =
+        (const VkPhysicalDeviceDescriptorBufferFeaturesEXT *)FindNextStruct(
+            &createInfo, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_BUFFER_FEATURES_EXT);
+
+    if(m_EnabledExtensions.ext_EXT_descriptor_buffer && descBufFeats && descBufFeats->descriptorBuffer)
+    {
+      m_DescriptorBuffers = true;
+
+      // if any update after bind feature is enabled, check robustBufferAccessUpdateAfterBind
+      m_DescriptorBufferProperties = {
+          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_BUFFER_PROPERTIES_EXT,
+      };
+
+      VkPhysicalDeviceProperties2 availBase = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+      availBase.pNext = &m_DescriptorBufferProperties;
+      ObjDisp(physicalDevice)->GetPhysicalDeviceProperties2(Unwrap(physicalDevice), &availBase);
+
+      bool robustness = false;
+
+      // VkPhysicalDeviceFeatures2 takes priority
+      if(enabledFeatures2)
+      {
+        robustness = enabledFeatures2->features.robustBufferAccess != VK_FALSE;
+      }
+      else if(createInfo.pEnabledFeatures && createInfo.pEnabledFeatures->robustBufferAccess)
+      {
+        robustness = true;
+      }
+
+      // we should have forced on robustness
+      RDCASSERT(robustness);
+
+      m_DescriptorBufferProperties.uniformBufferDescriptorSize =
+          m_DescriptorBufferProperties.robustUniformBufferDescriptorSize;
+      m_DescriptorBufferProperties.storageBufferDescriptorSize =
+          m_DescriptorBufferProperties.robustStorageBufferDescriptorSize;
+      m_DescriptorBufferProperties.uniformTexelBufferDescriptorSize =
+          m_DescriptorBufferProperties.robustUniformTexelBufferDescriptorSize;
+      m_DescriptorBufferProperties.storageTexelBufferDescriptorSize =
+          m_DescriptorBufferProperties.robustStorageTexelBufferDescriptorSize;
+
+      // ensure our fixed-size is large enough for this driver.
+      RDCASSERT(m_DescriptorBufferProperties.accelerationStructureCaptureReplayDescriptorDataSize <=
+                FixedOpaqueDescriptorCaptureSize);
+      RDCASSERT(m_DescriptorBufferProperties.bufferCaptureReplayDescriptorDataSize <=
+                FixedOpaqueDescriptorCaptureSize);
+      RDCASSERT(m_DescriptorBufferProperties.imageCaptureReplayDescriptorDataSize <=
+                FixedOpaqueDescriptorCaptureSize);
+      RDCASSERT(m_DescriptorBufferProperties.imageViewCaptureReplayDescriptorDataSize <=
+                FixedOpaqueDescriptorCaptureSize);
+      RDCASSERT(m_DescriptorBufferProperties.samplerCaptureReplayDescriptorDataSize <=
+                FixedOpaqueDescriptorCaptureSize);
+
+      uint32_t maxResourceDescriptorSize = 0;
+#define CALC_MAX_SIZE(prop)   \
+  maxResourceDescriptorSize = \
+      RDCMAX(maxResourceDescriptorSize, (uint32_t)m_DescriptorBufferProperties.prop);
+
+      CALC_MAX_SIZE(storageImageDescriptorSize);
+      CALC_MAX_SIZE(sampledImageDescriptorSize);
+      CALC_MAX_SIZE(robustUniformTexelBufferDescriptorSize);
+      CALC_MAX_SIZE(robustStorageTexelBufferDescriptorSize);
+      CALC_MAX_SIZE(robustUniformBufferDescriptorSize);
+      CALC_MAX_SIZE(robustStorageBufferDescriptorSize);
+      CALC_MAX_SIZE(inputAttachmentDescriptorSize);
+      CALC_MAX_SIZE(accelerationStructureDescriptorSize);
+
+      m_ResourceDescriptorBufferReserveSize =
+          AlignUp(maxResourceDescriptorSize * 2,
+                  (uint32_t)m_DescriptorBufferProperties.descriptorBufferOffsetAlignment);
+
+      m_IgnoreLayoutForDescriptors = descBufFeats->descriptorBufferImageLayoutIgnored != VK_FALSE;
+    }
 
     // MoltenVK reports 0x3fffffff for this limit so just ignore that value if it comes up
     RDCASSERT(m_PhysicalDeviceData.props.limits.maxBoundDescriptorSets <
@@ -4148,7 +4541,42 @@ bool WrappedVulkan::Serialise_vkCreateDevice(SerialiserType &ser, VkPhysicalDevi
       m_PhysicalDeviceData.maxMemoryAllocationSize = 0x80000000U;
     }
 
+    VulkanCreationInfo::pushConstantDescriptorStorage = ResourceIDGen::GetNewUniqueID();
+    VulkanCreationInfo::descriptorSetStorage.resize(
+        m_PhysicalDeviceData.props.limits.maxBoundDescriptorSets);
+    for(size_t i = 0; i < VulkanCreationInfo::descriptorSetStorage.size(); i++)
+      VulkanCreationInfo::descriptorSetStorage[i] = ResourceIDGen::GetNewUniqueID();
+
     ChooseMemoryIndices();
+
+    if(DescriptorBuffers())
+    {
+      VulkanCreationInfo::descriptorBufferStorage.resize(
+          m_DescriptorBufferProperties.maxDescriptorBufferBindings);
+      VulkanCreationInfo::inlineBufferStorage.resize(
+          m_DescriptorBufferProperties.maxDescriptorBufferBindings);
+      for(size_t i = 0; i < VulkanCreationInfo::descriptorBufferStorage.size(); i++)
+      {
+        VulkanCreationInfo::descriptorBufferStorage[i] = ResourceIDGen::GetNewUniqueID();
+        VulkanCreationInfo::inlineBufferStorage[i] = ResourceIDGen::GetNewUniqueID();
+      }
+
+      EstimateDescriptorFormats();
+
+      // indicate to any self-capture that we have reserved the descriptors
+      if(ObjDisp(m_Device)->SetDebugUtilsObjectTagEXT)
+      {
+        VkDebugUtilsObjectTagInfoEXT tagInfo = {VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_TAG_INFO_EXT};
+        tagInfo.objectType = VK_OBJECT_TYPE_INSTANCE;
+        tagInfo.objectHandle = uint64_t(Unwrap(m_Instance));
+        tagInfo.tagName = RENDERDOC_DescriptorsReservation_UUID;
+        tagInfo.tagSize = sizeof(bool);
+        bool yes = true;
+        tagInfo.pTag = &yes;
+
+        vkr = ObjDisp(m_Device)->SetDebugUtilsObjectTagEXT(Unwrap(m_Device), &tagInfo);
+      }
+    }
 
     APIProps.vendor = GetDriverInfo().Vendor();
 
@@ -4158,10 +4586,6 @@ bool WrappedVulkan::Serialise_vkCreateDevice(SerialiserType &ser, VkPhysicalDevi
     SetDebugMessageSink(NULL);
 
     m_ShaderCache = new VulkanShaderCache(this);
-
-    m_DebugManager = new VulkanDebugManager(this);
-
-    m_Replay->CreateResources();
 
     SetDebugMessageSink(sink);
   }
@@ -4339,6 +4763,79 @@ VkResult WrappedVulkan::vkCreateDevice(VkPhysicalDevice physicalDevice,
   else if(createInfo.pEnabledFeatures)
     enabledFeatures = *createInfo.pEnabledFeatures;
 
+  bool descIndexingAllowsRBA = true;
+
+  VkPhysicalDeviceVulkan12Features *vulkan12Features =
+      (VkPhysicalDeviceVulkan12Features *)FindNextStruct(
+          &createInfo, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES);
+
+  if(vulkan12Features && (vulkan12Features->descriptorBindingUniformBufferUpdateAfterBind ||
+                          vulkan12Features->descriptorBindingStorageBufferUpdateAfterBind ||
+                          vulkan12Features->descriptorBindingUniformTexelBufferUpdateAfterBind ||
+                          vulkan12Features->descriptorBindingStorageTexelBufferUpdateAfterBind))
+  {
+    // if any update after bind feature is enabled, check robustBufferAccessUpdateAfterBind
+    VkPhysicalDeviceVulkan12Properties vulkan12Props = {
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES,
+    };
+
+    VkPhysicalDeviceProperties2 availBase = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+    availBase.pNext = &vulkan12Props;
+    ObjDisp(physicalDevice)->GetPhysicalDeviceProperties2(Unwrap(physicalDevice), &availBase);
+
+    descIndexingAllowsRBA = vulkan12Props.robustBufferAccessUpdateAfterBind != VK_FALSE;
+  }
+
+  VkPhysicalDeviceDescriptorIndexingFeatures *descIndexingFeatures =
+      (VkPhysicalDeviceDescriptorIndexingFeatures *)FindNextStruct(
+          &createInfo, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES);
+
+  if(descIndexingFeatures &&
+     (descIndexingFeatures->descriptorBindingUniformBufferUpdateAfterBind ||
+      descIndexingFeatures->descriptorBindingStorageBufferUpdateAfterBind ||
+      descIndexingFeatures->descriptorBindingUniformTexelBufferUpdateAfterBind ||
+      descIndexingFeatures->descriptorBindingStorageTexelBufferUpdateAfterBind))
+  {
+    // if any update after bind feature is enabled, check robustBufferAccessUpdateAfterBind
+    VkPhysicalDeviceDescriptorIndexingProperties descIndexingProps = {
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_PROPERTIES,
+    };
+
+    VkPhysicalDeviceProperties2 availBase = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+    availBase.pNext = &descIndexingProps;
+    ObjDisp(physicalDevice)->GetPhysicalDeviceProperties2(Unwrap(physicalDevice), &availBase);
+
+    descIndexingAllowsRBA = descIndexingProps.robustBufferAccessUpdateAfterBind != VK_FALSE;
+  }
+
+  if(availFeatures.robustBufferAccess && !descIndexingAllowsRBA)
+  {
+    // if the feature is available but we can't use it, warn
+    RDCWARN(
+        "robustBufferAccess is available, but cannot be enabled due to "
+        "robustBufferAccessUpdateAfterBind not being avilable and some UpdateAfterBind features "
+        "being enabled. "
+        "out of bounds access due to bugs in application or RenderDoc may cause crashes");
+
+    for(const char *e : Extensions)
+    {
+      if(rdcstr(e) == VK_EXT_DESCRIPTOR_BUFFER_EXTENSION_NAME)
+      {
+        RDCERR("VK_EXT_descriptor_buffer is enabled without robust buffer access!");
+      }
+    }
+  }
+  else
+  {
+    // either the feature is available, and we enable it, or it's not available at all.
+    if(availFeatures.robustBufferAccess)
+      enabledFeatures.robustBufferAccess = true;
+    else
+      RDCWARN(
+          "robustBufferAccess = false, out of bounds access due to bugs in application or "
+          "RenderDoc may cause crashes");
+  }
+
   // enable this feature as it's needed at capture time to save MSAA initial states
   if(availFeatures.shaderStorageImageWriteWithoutFormat)
     enabledFeatures.shaderStorageImageWriteWithoutFormat = true;
@@ -4411,6 +4908,8 @@ VkResult WrappedVulkan::vkCreateDevice(VkPhysicalDevice physicalDevice,
   {
     accFeatures->accelerationStructureCaptureReplay = VK_TRUE;
     m_AccelerationStructures = true;
+
+    RDCLOG("Acceleration structures enabled, ALL MEMORY WILL BE MARKED AS BDA");
   }
 
   VkPhysicalDeviceRayTracingPipelineFeaturesKHR *rtpFeatures =
@@ -4419,6 +4918,29 @@ VkResult WrappedVulkan::vkCreateDevice(VkPhysicalDevice physicalDevice,
   if(rtpFeatures && rtpFeatures->rayTracingPipeline)
   {
     rtpFeatures->rayTracingPipelineShaderGroupHandleCaptureReplay = VK_TRUE;
+  }
+
+  VkPhysicalDeviceDescriptorBufferFeaturesEXT *descBufFeatures =
+      (VkPhysicalDeviceDescriptorBufferFeaturesEXT *)FindNextStruct(
+          &createInfo, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_BUFFER_FEATURES_EXT);
+  if(descBufFeatures && descBufFeatures->descriptorBuffer)
+  {
+    descBufFeatures->descriptorBufferCaptureReplay = VK_TRUE;
+    m_DescriptorBuffers = true;
+
+    VkPhysicalDeviceDescriptorBufferFeaturesEXT availDescBufFeatures = {
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_BUFFER_FEATURES_EXT,
+    };
+
+    VkPhysicalDeviceFeatures2 availBase = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+    availBase.pNext = &availDescBufFeatures;
+    ObjDisp(physicalDevice)->GetPhysicalDeviceFeatures2(Unwrap(physicalDevice), &availBase);
+
+    // enable the imageLayoutIgnored feature if available
+    if(availDescBufFeatures.descriptorBufferImageLayoutIgnored)
+      descBufFeatures->descriptorBufferImageLayoutIgnored = VK_TRUE;
+
+    RDCLOG("descriptor buffers enabled, ALL MEMORY WILL BE MARKED AS BDA");
   }
 
   VkResult ret;
@@ -4431,7 +4953,7 @@ VkResult WrappedVulkan::vkCreateDevice(VkPhysicalDevice physicalDevice,
     RDCLOG("Created capture device from physical device %d",
            m_PhysicalDevices.indexOf(physicalDevice));
 
-    ResourceId id = GetResourceManager()->WrapResource(*pDevice, *pDevice);
+    ResourceId id = GetResourceManager()->WrapResource(ResourceId(), *pDevice, *pDevice);
 
     if(IsCaptureMode(m_State))
     {
@@ -4502,10 +5024,6 @@ VkResult WrappedVulkan::vkCreateDevice(VkPhysicalDevice physicalDevice,
 
       InitDeviceExtensionTables(*pDevice, record->instDevInfo);
     }
-    else
-    {
-      GetResourceManager()->AddLiveResource(id, *pDevice);
-    }
 
     VkDevice device = *pDevice;
 
@@ -4525,7 +5043,7 @@ VkResult WrappedVulkan::vkCreateDevice(VkPhysicalDevice physicalDevice,
                                                &m_InternalCmds.cmdpool);
       CHECK_VKR(this, vkr);
 
-      GetResourceManager()->WrapResource(Unwrap(device), m_InternalCmds.cmdpool);
+      GetResourceManager()->WrapResource(ResourceId(), Unwrap(device), m_InternalCmds.cmdpool);
     }
 
     // for each queue family that isn't our own, create a command pool and command buffer on that
@@ -4534,6 +5052,11 @@ VkResult WrappedVulkan::vkCreateDevice(VkPhysicalDevice physicalDevice,
     {
       uint32_t qidx = createInfo.pQueueCreateInfos[i].queueFamilyIndex;
       m_ExternalQueues.resize(RDCMAX((uint32_t)m_ExternalQueues.size(), qidx + 1));
+
+      // Resize also the image barriers, as ImageBarrierSequence::SetMaxQueueFamilyIndex
+      // just sets the static MaxQueueFamilyIndex
+      m_setupImageBarriers.ResizeForMaxQueueFamilyIndex(qidx);
+      m_cleanupImageBarriers.ResizeForMaxQueueFamilyIndex(qidx);
 
       ImageBarrierSequence::SetMaxQueueFamilyIndex(qidx);
 
@@ -4547,7 +5070,7 @@ VkResult WrappedVulkan::vkCreateDevice(VkPhysicalDevice physicalDevice,
                                                &m_ExternalQueues[qidx].pool);
       CHECK_VKR(this, vkr);
 
-      GetResourceManager()->WrapResource(Unwrap(device), m_ExternalQueues[qidx].pool);
+      GetResourceManager()->WrapResource(ResourceId(), Unwrap(device), m_ExternalQueues[qidx].pool);
 
       VkCommandBufferAllocateInfo cmdInfo = {
           VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
@@ -4572,7 +5095,8 @@ VkResult WrappedVulkan::vkCreateDevice(VkPhysicalDevice physicalDevice,
         else
           SetDispatchTableOverMagicNumber(device, m_ExternalQueues[qidx].ring[x].acquire);
 
-        GetResourceManager()->WrapResource(Unwrap(device), m_ExternalQueues[qidx].ring[x].acquire);
+        GetResourceManager()->WrapResource(ResourceId(), Unwrap(device),
+                                           m_ExternalQueues[qidx].ring[x].acquire);
 
         vkr = ObjDisp(device)->AllocateCommandBuffers(Unwrap(device), &cmdInfo,
                                                       &m_ExternalQueues[qidx].ring[x].release);
@@ -4583,25 +5107,29 @@ VkResult WrappedVulkan::vkCreateDevice(VkPhysicalDevice physicalDevice,
         else
           SetDispatchTableOverMagicNumber(device, m_ExternalQueues[qidx].ring[x].release);
 
-        GetResourceManager()->WrapResource(Unwrap(device), m_ExternalQueues[qidx].ring[x].release);
+        GetResourceManager()->WrapResource(ResourceId(), Unwrap(device),
+                                           m_ExternalQueues[qidx].ring[x].release);
 
         vkr = ObjDisp(device)->CreateSemaphore(Unwrap(device), &semInfo, NULL,
                                                &m_ExternalQueues[qidx].ring[x].fromext);
         CHECK_VKR(this, vkr);
 
-        GetResourceManager()->WrapResource(Unwrap(device), m_ExternalQueues[qidx].ring[x].fromext);
+        GetResourceManager()->WrapResource(ResourceId(), Unwrap(device),
+                                           m_ExternalQueues[qidx].ring[x].fromext);
 
         vkr = ObjDisp(device)->CreateSemaphore(Unwrap(device), &semInfo, NULL,
                                                &m_ExternalQueues[qidx].ring[x].toext);
         CHECK_VKR(this, vkr);
 
-        GetResourceManager()->WrapResource(Unwrap(device), m_ExternalQueues[qidx].ring[x].toext);
+        GetResourceManager()->WrapResource(ResourceId(), Unwrap(device),
+                                           m_ExternalQueues[qidx].ring[x].toext);
 
         vkr = ObjDisp(device)->CreateFence(Unwrap(device), &fenceInfo, NULL,
                                            &m_ExternalQueues[qidx].ring[x].fence);
         CHECK_VKR(this, vkr);
 
-        GetResourceManager()->WrapResource(Unwrap(device), m_ExternalQueues[qidx].ring[x].fence);
+        GetResourceManager()->WrapResource(ResourceId(), Unwrap(device),
+                                           m_ExternalQueues[qidx].ring[x].fence);
       }
     }
 
@@ -4617,6 +5145,122 @@ VkResult WrappedVulkan::vkCreateDevice(VkPhysicalDevice physicalDevice,
 
     GetPhysicalDeviceDriverProperties(ObjDisp(physicalDevice), Unwrap(physicalDevice),
                                       m_PhysicalDeviceData.driverProps);
+
+    if(m_EnabledExtensions.ext_EXT_descriptor_buffer && descBufFeatures &&
+       descBufFeatures->descriptorBuffer)
+    {
+      // if any update after bind feature is enabled, check robustBufferAccessUpdateAfterBind
+      m_DescriptorBufferProperties = {
+          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_BUFFER_PROPERTIES_EXT,
+      };
+
+      VkPhysicalDeviceProperties2 availBase = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+      availBase.pNext = &m_DescriptorBufferProperties;
+      ObjDisp(physicalDevice)->GetPhysicalDeviceProperties2(Unwrap(physicalDevice), &availBase);
+
+      bool robustness = false;
+
+      // VkPhysicalDeviceFeatures2 takes priority
+      if(enabledFeatures2)
+      {
+        robustness = enabledFeatures2->features.robustBufferAccess != VK_FALSE;
+      }
+      else if(createInfo.pEnabledFeatures && createInfo.pEnabledFeatures->robustBufferAccess)
+      {
+        robustness = true;
+      }
+
+      // we should have forced on robustness
+      RDCASSERT(robustness);
+
+      m_DescriptorBufferProperties.uniformBufferDescriptorSize =
+          m_DescriptorBufferProperties.robustUniformBufferDescriptorSize;
+      m_DescriptorBufferProperties.storageBufferDescriptorSize =
+          m_DescriptorBufferProperties.robustStorageBufferDescriptorSize;
+      m_DescriptorBufferProperties.uniformTexelBufferDescriptorSize =
+          m_DescriptorBufferProperties.robustUniformTexelBufferDescriptorSize;
+      m_DescriptorBufferProperties.storageTexelBufferDescriptorSize =
+          m_DescriptorBufferProperties.robustStorageTexelBufferDescriptorSize;
+
+      // ensure our fixed-size is large enough for this driver.
+      RDCASSERT(m_DescriptorBufferProperties.accelerationStructureCaptureReplayDescriptorDataSize <=
+                FixedOpaqueDescriptorCaptureSize);
+      RDCASSERT(m_DescriptorBufferProperties.bufferCaptureReplayDescriptorDataSize <=
+                FixedOpaqueDescriptorCaptureSize);
+      RDCASSERT(m_DescriptorBufferProperties.imageCaptureReplayDescriptorDataSize <=
+                FixedOpaqueDescriptorCaptureSize);
+      RDCASSERT(m_DescriptorBufferProperties.imageViewCaptureReplayDescriptorDataSize <=
+                FixedOpaqueDescriptorCaptureSize);
+      RDCASSERT(m_DescriptorBufferProperties.samplerCaptureReplayDescriptorDataSize <=
+                FixedOpaqueDescriptorCaptureSize);
+
+      uint32_t maxResourceDescriptorSize = 0;
+#define CALC_MAX_SIZE(prop)   \
+  maxResourceDescriptorSize = \
+      RDCMAX(maxResourceDescriptorSize, (uint32_t)m_DescriptorBufferProperties.prop);
+
+      CALC_MAX_SIZE(storageImageDescriptorSize);
+      CALC_MAX_SIZE(sampledImageDescriptorSize);
+      CALC_MAX_SIZE(robustUniformTexelBufferDescriptorSize);
+      CALC_MAX_SIZE(robustStorageTexelBufferDescriptorSize);
+      CALC_MAX_SIZE(robustUniformBufferDescriptorSize);
+      CALC_MAX_SIZE(robustStorageBufferDescriptorSize);
+      CALC_MAX_SIZE(inputAttachmentDescriptorSize);
+      CALC_MAX_SIZE(accelerationStructureDescriptorSize);
+
+      m_ResourceDescriptorBufferReserveSize =
+          AlignUp(maxResourceDescriptorSize * 2,
+                  (uint32_t)m_DescriptorBufferProperties.descriptorBufferOffsetAlignment);
+
+      m_IgnoreLayoutForDescriptors = descBufFeatures->descriptorBufferImageLayoutIgnored != VK_FALSE;
+
+      VkPhysicalDeviceRobustness2FeaturesKHR *robustness2 =
+          (VkPhysicalDeviceRobustness2FeaturesKHR *)FindNextStruct(
+              &createInfo, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_KHR);
+
+      // record all the NULL descriptors
+      if(IsCaptureMode(m_State) && robustness2 && robustness2->nullDescriptor)
+      {
+        VkResourceRecord *record = GetRecord(*pDevice);
+        RDCASSERT(record);
+
+        VkDescriptorGetInfoEXT getInfo = {
+            VK_STRUCTURE_TYPE_DESCRIPTOR_GET_INFO_EXT,
+        };
+
+        rdcarray<rdcpair<VkDescriptorType, size_t>> descriptorTypes = {
+            {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+             m_DescriptorBufferProperties.sampledImageDescriptorSize},
+            {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+             m_DescriptorBufferProperties.storageImageDescriptorSize},
+            {VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER,
+             m_DescriptorBufferProperties.robustUniformTexelBufferDescriptorSize},
+            {VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER,
+             m_DescriptorBufferProperties.robustStorageTexelBufferDescriptorSize},
+            {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+             m_DescriptorBufferProperties.robustUniformBufferDescriptorSize},
+            {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+             m_DescriptorBufferProperties.robustStorageBufferDescriptorSize},
+        };
+
+        if(m_AccelerationStructures)
+        {
+          descriptorTypes.push_back(
+              {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,
+               m_DescriptorBufferProperties.accelerationStructureDescriptorSize});
+        }
+
+        byte dummy[256];
+        for(rdcpair<VkDescriptorType, size_t> typeAndSize : descriptorTypes)
+        {
+          getInfo.type = typeAndSize.first;
+
+          vkGetDescriptorEXT(*pDevice, &getInfo, typeAndSize.second, dummy);
+        }
+      }
+
+      m_NULLDescriptorPatternSaved = true;
+    }
 
     m_PhysicalDeviceData.driverInfo =
         VkDriverInfo(m_PhysicalDeviceData.props, m_PhysicalDeviceData.driverProps, true);
@@ -4634,6 +5278,9 @@ VkResult WrappedVulkan::vkCreateDevice(VkPhysicalDevice physicalDevice,
 
     m_PhysicalDeviceData.maxMemoryAllocationSize = 0;
     ChooseMemoryIndices();
+
+    if(DescriptorBuffers())
+      EstimateDescriptorFormats();
 
     m_PhysicalDeviceData.queueCount = (uint32_t)queueProps.size();
     for(size_t i = 0; i < queueProps.size(); i++)
@@ -4695,6 +5342,8 @@ void WrappedVulkan::vkDestroyDevice(VkDevice device, const VkAllocationCallbacks
   SAFE_DELETE(m_DebugManager);
   SAFE_DELETE(m_ShaderCache);
   SAFE_DELETE(m_TextRenderer);
+
+  m_ASManager->Cleanup();
 
   // since we didn't create proper registered resources for our command buffers,
   // they won't be taken down properly with the pool. So we release them (just our

@@ -1,7 +1,7 @@
 /******************************************************************************
  * The MIT License (MIT)
  *
- * Copyright (c) 2019-2024 Baldur Karlsson
+ * Copyright (c) 2015-2026 Baldur Karlsson
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -30,6 +30,11 @@
 // for compatibility we use the same DXBC name since it's now configured by the UI
 RDOC_EXTERN_CONFIG(rdcarray<rdcstr>, DXBC_Debug_SearchDirPaths);
 
+ResourceId VulkanCreationInfo::pushConstantDescriptorStorage;
+rdcarray<ResourceId> VulkanCreationInfo::descriptorSetStorage;
+rdcarray<ResourceId> VulkanCreationInfo::descriptorBufferStorage;
+rdcarray<ResourceId> VulkanCreationInfo::inlineBufferStorage;
+
 VkDynamicState ConvertDynamicState(VulkanDynamicStateIndex idx)
 {
   switch(idx)
@@ -57,7 +62,7 @@ VkDynamicState ConvertDynamicState(VulkanDynamicStateIndex idx)
     case VkDynamicExclusiveScissorNV: return VK_DYNAMIC_STATE_EXCLUSIVE_SCISSOR_NV;
     case VkDynamicExclusiveScissorEnableNV: return VK_DYNAMIC_STATE_EXCLUSIVE_SCISSOR_ENABLE_NV;
     case VkDynamicShadingRateKHR: return VK_DYNAMIC_STATE_FRAGMENT_SHADING_RATE_KHR;
-    case VkDynamicLineStippleKHR: return VK_DYNAMIC_STATE_LINE_STIPPLE_KHR;
+    case VkDynamicLineStipple: return VK_DYNAMIC_STATE_LINE_STIPPLE;
     case VkDynamicCullMode: return VK_DYNAMIC_STATE_CULL_MODE;
     case VkDynamicFrontFace: return VK_DYNAMIC_STATE_FRONT_FACE;
     case VkDynamicPrimitiveTopology: return VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY;
@@ -115,6 +120,7 @@ VkDynamicState ConvertDynamicState(VulkanDynamicStateIndex idx)
     case VkDynamicCoverageReductionModeEXT: return VK_DYNAMIC_STATE_COVERAGE_REDUCTION_MODE_NV;
     case VkDynamicAttachmentFeedbackLoopEnableEXT:
       return VK_DYNAMIC_STATE_ATTACHMENT_FEEDBACK_LOOP_ENABLE_EXT;
+    case VkDynamicAttachmentDepthClampRangeEXT: return VK_DYNAMIC_STATE_DEPTH_CLAMP_RANGE_EXT;
     case VkDynamicCount: break;
   }
 
@@ -150,7 +156,7 @@ VulkanDynamicStateIndex ConvertDynamicState(VkDynamicState state)
     case VK_DYNAMIC_STATE_EXCLUSIVE_SCISSOR_NV: return VkDynamicExclusiveScissorNV;
     case VK_DYNAMIC_STATE_EXCLUSIVE_SCISSOR_ENABLE_NV: return VkDynamicExclusiveScissorEnableNV;
     case VK_DYNAMIC_STATE_FRAGMENT_SHADING_RATE_KHR: return VkDynamicShadingRateKHR;
-    case VK_DYNAMIC_STATE_LINE_STIPPLE_KHR: return VkDynamicLineStippleKHR;
+    case VK_DYNAMIC_STATE_LINE_STIPPLE: return VkDynamicLineStipple;
     case VK_DYNAMIC_STATE_CULL_MODE: return VkDynamicCullMode;
     case VK_DYNAMIC_STATE_FRONT_FACE: return VkDynamicFrontFace;
     case VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY: return VkDynamicPrimitiveTopology;
@@ -208,6 +214,7 @@ VulkanDynamicStateIndex ConvertDynamicState(VkDynamicState state)
     case VK_DYNAMIC_STATE_COVERAGE_REDUCTION_MODE_NV: return VkDynamicCoverageReductionModeEXT;
     case VK_DYNAMIC_STATE_ATTACHMENT_FEEDBACK_LOOP_ENABLE_EXT:
       return VkDynamicAttachmentFeedbackLoopEnableEXT;
+    case VK_DYNAMIC_STATE_DEPTH_CLAMP_RANGE_EXT: return VkDynamicAttachmentDepthClampRangeEXT;
     case VK_DYNAMIC_STATE_MAX_ENUM: break;
   }
 
@@ -249,7 +256,7 @@ static VkGraphicsPipelineLibraryFlagsEXT DynamicStateValidState(VkDynamicState s
     case VK_DYNAMIC_STATE_EXCLUSIVE_SCISSOR_NV: return vert;
     case VK_DYNAMIC_STATE_EXCLUSIVE_SCISSOR_ENABLE_NV: return vert;
     case VK_DYNAMIC_STATE_FRAGMENT_SHADING_RATE_KHR: return vert | frag;
-    case VK_DYNAMIC_STATE_LINE_STIPPLE_KHR: return vert;
+    case VK_DYNAMIC_STATE_LINE_STIPPLE: return vert;
     case VK_DYNAMIC_STATE_CULL_MODE: return vert;
     case VK_DYNAMIC_STATE_FRONT_FACE: return vert;
     case VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY: return vinput;
@@ -301,6 +308,7 @@ static VkGraphicsPipelineLibraryFlagsEXT DynamicStateValidState(VkDynamicState s
     case VK_DYNAMIC_STATE_REPRESENTATIVE_FRAGMENT_TEST_ENABLE_NV: return frag;
     case VK_DYNAMIC_STATE_COVERAGE_REDUCTION_MODE_NV: return frag | colout;
     case VK_DYNAMIC_STATE_ATTACHMENT_FEEDBACK_LOOP_ENABLE_EXT: return colout;
+    case VK_DYNAMIC_STATE_DEPTH_CLAMP_RANGE_EXT: return vert;
     case VK_DYNAMIC_STATE_MAX_ENUM: break;
   }
 
@@ -313,8 +321,10 @@ static VkGraphicsPipelineLibraryFlagsEXT DynamicStateValidState(VkDynamicState s
 }
 
 void DescSetLayout::Init(VulkanResourceManager *resourceMan, VulkanCreationInfo &info,
-                         const VkDescriptorSetLayoutCreateInfo *pCreateInfo)
+                         ResourceId id, const VkDescriptorSetLayoutCreateInfo *pCreateInfo)
 {
+  resourceId = id;
+
   dynamicCount = 0;
   inlineCount = 0;
   inlineByteSize = 0;
@@ -329,8 +339,8 @@ void DescSetLayout::Init(VulkanResourceManager *resourceMan, VulkanCreationInfo 
 
   anyStageFlags = 0;
 
-  VkDescriptorSetLayoutBindingFlagsCreateInfo *bindingFlags =
-      (VkDescriptorSetLayoutBindingFlagsCreateInfo *)FindNextStruct(
+  const VkDescriptorSetLayoutBindingFlagsCreateInfo *bindingFlags =
+      (const VkDescriptorSetLayoutBindingFlagsCreateInfo *)FindNextStruct(
           pCreateInfo, VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO);
 
   // ignore degenerate struct
@@ -710,11 +720,7 @@ bool CreateDescriptorWritesForSlotData(WrappedVulkan *vk, rdcarray<VkWriteDescri
     uint32_t arrayIdx = slot - writes.back().dstArrayElement;
 
     ResourceId resId = slots[slot].resource;
-    if(rm->HasLiveResource(resId))
-      resId = rm->GetLiveID(resId);
     ResourceId sampId = slots[slot].sampler;
-    if(rm->HasLiveResource(sampId))
-      sampId = rm->GetLiveID(sampId);
 
     switch(descType)
     {
@@ -724,26 +730,26 @@ bool CreateDescriptorWritesForSlotData(WrappedVulkan *vk, rdcarray<VkWriteDescri
       case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:
       case VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT:
       {
-        if(descType != VK_DESCRIPTOR_TYPE_SAMPLER && rm->HasCurrentResource(resId))
-          writeImage[arrayIdx].imageView = rm->GetCurrentHandle<VkImageView>(resId);
+        if(descType != VK_DESCRIPTOR_TYPE_SAMPLER && rm->HasResource(resId))
+          writeImage[arrayIdx].imageView = rm->GetHandle<VkImageView>(resId);
         else
           writeImage[arrayIdx].imageView = VK_NULL_HANDLE;
 
         if((descType == VK_DESCRIPTOR_TYPE_SAMPLER ||
             descType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) &&
-           rm->HasCurrentResource(sampId))
-          writeImage[arrayIdx].sampler = rm->GetCurrentHandle<VkSampler>(sampId);
+           rm->HasResource(sampId))
+          writeImage[arrayIdx].sampler = rm->GetHandle<VkSampler>(sampId);
         else
           writeImage[arrayIdx].sampler = VK_NULL_HANDLE;
 
-        writeImage[arrayIdx].imageLayout = convert(slots[slot].imageLayout);
+        writeImage[arrayIdx].imageLayout = convert(slots[slot].imageLayoutOrFormat);
 
         // if we're not updating a SAMPLER descriptor fill in immutable samplers so that
         // our
         // validity checking doesn't have to look them up.
         if(immutableSamplers && descType != VK_DESCRIPTOR_TYPE_SAMPLER)
         {
-          writeImage[arrayIdx].sampler = rm->GetCurrentHandle<VkSampler>(immutableSamplers[slot]);
+          writeImage[arrayIdx].sampler = rm->GetHandle<VkSampler>(immutableSamplers[slot]);
         }
 
         // set the write array (possibly redundant if we're collating as writeImage only
@@ -754,8 +760,8 @@ bool CreateDescriptorWritesForSlotData(WrappedVulkan *vk, rdcarray<VkWriteDescri
       case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER:
       case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER:
       {
-        if(rm->HasCurrentResource(resId))
-          writeTexelBuffer[arrayIdx] = rm->GetCurrentHandle<VkBufferView>(resId);
+        if(rm->HasResource(resId))
+          writeTexelBuffer[arrayIdx] = rm->GetHandle<VkBufferView>(resId);
         else
           writeTexelBuffer[arrayIdx] = VK_NULL_HANDLE;
 
@@ -767,8 +773,8 @@ bool CreateDescriptorWritesForSlotData(WrappedVulkan *vk, rdcarray<VkWriteDescri
       case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC:
       case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC:
       {
-        if(rm->HasCurrentResource(resId))
-          writeBuffer[arrayIdx].buffer = rm->GetCurrentHandle<VkBuffer>(resId);
+        if(rm->HasResource(resId))
+          writeBuffer[arrayIdx].buffer = rm->GetHandle<VkBuffer>(resId);
         else
           writeBuffer[arrayIdx].buffer = VK_NULL_HANDLE;
         writeBuffer[arrayIdx].offset = slots[slot].offset;
@@ -822,9 +828,31 @@ bool CreateDescriptorWritesForSlotData(WrappedVulkan *vk, rdcarray<VkWriteDescri
   return ret;
 }
 
-void VulkanCreationInfo::ShaderEntry::ProcessStaticDescriptorAccess(
-    ResourceId pushStorage, ResourceId specStorage, rdcarray<DescriptorAccess> &descriptorAccess,
-    rdcarray<const DescSetLayout *> setLayoutInfos) const
+uint32_t GetDescriptorSizeOfBind(VulkanResourceManager *resourceMan,
+                                 const rdcarray<DescSetLayout::Binding> &bindings,
+                                 const rdcarray<uint64_t> &mutableBitmasks, uint32_t fixedBindNumber)
+{
+  if(bindings[fixedBindNumber].layoutDescType != VK_DESCRIPTOR_TYPE_MUTABLE_EXT)
+    return resourceMan->DescriptorDataSize(bindings[fixedBindNumber].layoutDescType);
+
+  uint64_t bitmask = mutableBitmasks[fixedBindNumber];
+  uint32_t ret = 0;
+
+  for(uint64_t m = 0; m < (uint64_t)DescriptorSlotType::Count; m++)
+  {
+    if(bitmask & (1ULL << m))
+    {
+      ret = RDCMAX(ret, resourceMan->DescriptorDataSize(convert(DescriptorSlotType(m))));
+    }
+  }
+
+  return ret;
+}
+
+static void ProcessStaticDescriptorAccess(VulkanResourceManager *resourceMan,
+                                          const ShaderReflection *refl, ResourceId specStorage,
+                                          rdcarray<DescriptorAccess> &descriptorAccess,
+                                          rdcarray<const DescSetLayout *> setLayoutInfos)
 {
   if(!refl)
     return;
@@ -834,8 +862,7 @@ void VulkanCreationInfo::ShaderEntry::ProcessStaticDescriptorAccess(
   DescriptorAccess access;
   access.stage = refl->stage;
 
-  // we will store the descriptor set in byteSize to be decoded into descriptorStore later
-  access.byteSize = 0;
+  // desciptor set storage is fake, so byteSize is just 1
 
   descriptorAccess.reserve(descriptorAccess.size() + refl->constantBlocks.size() +
                            refl->samplers.size() + refl->readOnlyResources.size() +
@@ -854,19 +881,19 @@ void VulkanCreationInfo::ShaderEntry::ProcessStaticDescriptorAccess(
 
     if(!bind.bufferBacked)
     {
+      access.byteSize = 1;
+
       if(bind.compileConstants)
       {
         // spec constants
         access.descriptorStore = specStorage;
-        access.byteSize = 1;
         access.byteOffset = 0;
         descriptorAccess.push_back(access);
       }
       else
       {
         // push constants
-        access.descriptorStore = pushStorage;
-        access.byteSize = 1;
+        access.descriptorStore = VulkanCreationInfo::pushConstantDescriptorStorage;
         access.byteOffset = 0;
         descriptorAccess.push_back(access);
       }
@@ -878,19 +905,45 @@ void VulkanCreationInfo::ShaderEntry::ProcessStaticDescriptorAccess(
          bind.fixedBindNumber >= setLayoutInfos[bind.fixedBindSetOrSpace]->bindings.size())
         continue;
 
-      access.descriptorStore = ResourceId();
+      const DescSetLayout *setLayout = setLayoutInfos[bind.fixedBindSetOrSpace];
 
       // VkShaderStageFlagBits and ShaderStageMask are identical bit-for-bit.
       // this might be deliberate if the binding is never actually used dynamically, only
       // statically used bindings must be declared
-      if((setLayoutInfos[bind.fixedBindSetOrSpace]->bindings[bind.fixedBindNumber].stageFlags &
+      if((setLayout->bindings[bind.fixedBindNumber].stageFlags &
           (VkShaderStageFlags)MaskForStage(refl->stage)) == 0)
         continue;
 
-      access.byteSize = bind.fixedBindSetOrSpace;
-      access.byteOffset =
-          setLayoutInfos[bind.fixedBindSetOrSpace]->bindings[bind.fixedBindNumber].elemOffset +
-          setLayoutInfos[bind.fixedBindSetOrSpace]->inlineByteSize;
+      if((setLayout->flags & (VK_DESCRIPTOR_SET_LAYOUT_CREATE_DESCRIPTOR_BUFFER_BIT_EXT |
+                              VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT |
+                              VK_DESCRIPTOR_SET_LAYOUT_CREATE_EMBEDDED_IMMUTABLE_SAMPLERS_BIT_EXT)) ==
+         VK_DESCRIPTOR_SET_LAYOUT_CREATE_DESCRIPTOR_BUFFER_BIT_EXT)
+      {
+        if(setLayout->bindings[bind.fixedBindNumber].layoutDescType ==
+           VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK)
+        {
+          access.descriptorStore = VulkanCreationInfo::inlineBufferStorage[bind.fixedBindSetOrSpace];
+          access.byteSize = setLayout->bindings[bind.fixedBindNumber].descriptorCount;
+        }
+        else
+        {
+          access.descriptorStore =
+              VulkanCreationInfo::descriptorBufferStorage[bind.fixedBindSetOrSpace];
+          access.byteSize = GetDescriptorSizeOfBind(
+              resourceMan, setLayout->bindings, setLayout->mutableBitmasks, bind.fixedBindNumber);
+        }
+
+        // we are only handling non-arrays here
+        access.byteOffset = setLayout->bindings[bind.fixedBindNumber].elemOffset;
+      }
+      else
+      {
+        access.descriptorStore = VulkanCreationInfo::descriptorSetStorage[bind.fixedBindSetOrSpace];
+        access.byteSize = 1;
+        access.byteOffset =
+            setLayout->bindings[bind.fixedBindNumber].elemOffset + setLayout->inlineByteSize;
+      }
+
       descriptorAccess.push_back(access);
     }
   }
@@ -910,18 +963,44 @@ void VulkanCreationInfo::ShaderEntry::ProcessStaticDescriptorAccess(
        bind.fixedBindNumber >= setLayoutInfos[bind.fixedBindSetOrSpace]->bindings.size())
       continue;
 
+    const DescSetLayout *setLayout = setLayoutInfos[bind.fixedBindSetOrSpace];
+
     // VkShaderStageFlagBits and ShaderStageMask are identical bit-for-bit.
     // this might be deliberate if the binding is never actually used dynamically, only
     // statically used bindings must be declared
-    if((setLayoutInfos[bind.fixedBindSetOrSpace]->bindings[bind.fixedBindNumber].stageFlags &
+    if((setLayout->bindings[bind.fixedBindNumber].stageFlags &
         (VkShaderStageFlags)MaskForStage(refl->stage)) == 0)
       continue;
 
     access.type = DescriptorType::Sampler;
     access.index = i;
-    access.byteSize = bind.fixedBindSetOrSpace;
-    access.byteOffset =
-        setLayoutInfos[bind.fixedBindSetOrSpace]->bindings[bind.fixedBindNumber].elemOffset;
+
+    if((setLayout->flags & (VK_DESCRIPTOR_SET_LAYOUT_CREATE_DESCRIPTOR_BUFFER_BIT_EXT |
+                            VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT |
+                            VK_DESCRIPTOR_SET_LAYOUT_CREATE_EMBEDDED_IMMUTABLE_SAMPLERS_BIT_EXT)) ==
+       VK_DESCRIPTOR_SET_LAYOUT_CREATE_DESCRIPTOR_BUFFER_BIT_EXT)
+    {
+      access.descriptorStore = VulkanCreationInfo::descriptorBufferStorage[bind.fixedBindSetOrSpace];
+      access.byteSize = GetDescriptorSizeOfBind(resourceMan, setLayout->bindings,
+                                                setLayout->mutableBitmasks, bind.fixedBindNumber);
+
+      // we are only handling non-arrays here
+      access.byteOffset = setLayout->bindings[bind.fixedBindNumber].elemOffset;
+    }
+    else if(setLayout->flags & VK_DESCRIPTOR_SET_LAYOUT_CREATE_EMBEDDED_IMMUTABLE_SAMPLERS_BIT_EXT)
+    {
+      access.descriptorStore = setLayout->resourceId;
+      access.byteSize = 1;
+      access.byteOffset = bind.fixedBindNumber;
+    }
+    else
+    {
+      access.descriptorStore = VulkanCreationInfo::descriptorSetStorage[bind.fixedBindSetOrSpace];
+      access.byteSize = 1;
+      access.byteOffset =
+          setLayout->bindings[bind.fixedBindNumber].elemOffset + setLayout->inlineByteSize;
+    }
+
     descriptorAccess.push_back(access);
   }
 
@@ -938,18 +1017,38 @@ void VulkanCreationInfo::ShaderEntry::ProcessStaticDescriptorAccess(
        bind.fixedBindNumber >= setLayoutInfos[bind.fixedBindSetOrSpace]->bindings.size())
       continue;
 
+    const DescSetLayout *setLayout = setLayoutInfos[bind.fixedBindSetOrSpace];
+
     // VkShaderStageFlagBits and ShaderStageMask are identical bit-for-bit.
     // this might be deliberate if the binding is never actually used dynamically, only
     // statically used bindings must be declared
-    if((setLayoutInfos[bind.fixedBindSetOrSpace]->bindings[bind.fixedBindNumber].stageFlags &
+    if((setLayout->bindings[bind.fixedBindNumber].stageFlags &
         (VkShaderStageFlags)MaskForStage(refl->stage)) == 0)
       continue;
 
     access.type = refl->readOnlyResources[i].descriptorType;
     access.index = i;
-    access.byteSize = bind.fixedBindSetOrSpace;
-    access.byteOffset =
-        setLayoutInfos[bind.fixedBindSetOrSpace]->bindings[bind.fixedBindNumber].elemOffset;
+
+    if((setLayout->flags & (VK_DESCRIPTOR_SET_LAYOUT_CREATE_DESCRIPTOR_BUFFER_BIT_EXT |
+                            VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT |
+                            VK_DESCRIPTOR_SET_LAYOUT_CREATE_EMBEDDED_IMMUTABLE_SAMPLERS_BIT_EXT)) ==
+       VK_DESCRIPTOR_SET_LAYOUT_CREATE_DESCRIPTOR_BUFFER_BIT_EXT)
+    {
+      access.descriptorStore = VulkanCreationInfo::descriptorBufferStorage[bind.fixedBindSetOrSpace];
+      access.byteSize = GetDescriptorSizeOfBind(resourceMan, setLayout->bindings,
+                                                setLayout->mutableBitmasks, bind.fixedBindNumber);
+
+      // we are only handling non-arrays here
+      access.byteOffset = setLayout->bindings[bind.fixedBindNumber].elemOffset;
+    }
+    else
+    {
+      access.descriptorStore = VulkanCreationInfo::descriptorSetStorage[bind.fixedBindSetOrSpace];
+      access.byteSize = 1;
+      access.byteOffset =
+          setLayout->bindings[bind.fixedBindNumber].elemOffset + setLayout->inlineByteSize;
+    }
+
     descriptorAccess.push_back(access);
   }
 
@@ -966,18 +1065,38 @@ void VulkanCreationInfo::ShaderEntry::ProcessStaticDescriptorAccess(
        bind.fixedBindNumber >= setLayoutInfos[bind.fixedBindSetOrSpace]->bindings.size())
       continue;
 
+    const DescSetLayout *setLayout = setLayoutInfos[bind.fixedBindSetOrSpace];
+
     // VkShaderStageFlagBits and ShaderStageMask are identical bit-for-bit.
     // this might be deliberate if the binding is never actually used dynamically, only
     // statically used bindings must be declared
-    if((setLayoutInfos[bind.fixedBindSetOrSpace]->bindings[bind.fixedBindNumber].stageFlags &
+    if((setLayout->bindings[bind.fixedBindNumber].stageFlags &
         (VkShaderStageFlags)MaskForStage(refl->stage)) == 0)
       continue;
 
     access.type = refl->readWriteResources[i].descriptorType;
     access.index = i;
-    access.byteSize = bind.fixedBindSetOrSpace;
-    access.byteOffset =
-        setLayoutInfos[bind.fixedBindSetOrSpace]->bindings[bind.fixedBindNumber].elemOffset;
+
+    if((setLayout->flags & (VK_DESCRIPTOR_SET_LAYOUT_CREATE_DESCRIPTOR_BUFFER_BIT_EXT |
+                            VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT |
+                            VK_DESCRIPTOR_SET_LAYOUT_CREATE_EMBEDDED_IMMUTABLE_SAMPLERS_BIT_EXT)) ==
+       VK_DESCRIPTOR_SET_LAYOUT_CREATE_DESCRIPTOR_BUFFER_BIT_EXT)
+    {
+      access.descriptorStore = VulkanCreationInfo::descriptorBufferStorage[bind.fixedBindSetOrSpace];
+      access.byteSize = GetDescriptorSizeOfBind(resourceMan, setLayout->bindings,
+                                                setLayout->mutableBitmasks, bind.fixedBindNumber);
+
+      // we are only handling non-arrays here
+      access.byteOffset = setLayout->bindings[bind.fixedBindNumber].elemOffset;
+    }
+    else
+    {
+      access.descriptorStore = VulkanCreationInfo::descriptorSetStorage[bind.fixedBindSetOrSpace];
+      access.byteSize = 1;
+      access.byteOffset =
+          setLayout->bindings[bind.fixedBindNumber].elemOffset + setLayout->inlineByteSize;
+    }
+
     descriptorAccess.push_back(access);
   }
 }
@@ -1048,10 +1167,19 @@ void VulkanCreationInfo::ShaderObject::Init(VulkanResourceManager *resourceMan,
     }
   }
 
+  const VkCustomResolveCreateInfoEXT *customResInfo =
+      (const VkCustomResolveCreateInfoEXT *)FindNextStruct(
+          pCreateInfo, VK_STRUCTURE_TYPE_CUSTOM_RESOLVE_CREATE_INFO_EXT);
+  if(customResInfo)
+  {
+    hasCustomResCreateInfo = true;
+    customResolve = (customResInfo->customResolve == VK_TRUE);
+  }
+
   ShaderModuleReflection &reflData = info.m_ShaderModule[id].m_Reflections[key];
 
-  reflData.Init(resourceMan, id, info.m_ShaderModule[id].spirv, shad.entryPoint, pCreateInfo->stage,
-                shad.specialization);
+  reflData.Init(resourceMan, info, id, info.m_ShaderModule[id].spirv, shad.entryPoint,
+                pCreateInfo->stage, shad.specialization);
 
   shad.refl = reflData.refl;
   shad.patchData = &reflData.patchData;
@@ -1060,16 +1188,19 @@ void VulkanCreationInfo::ShaderObject::Init(VulkanResourceManager *resourceMan,
   for(ResourceId setLayout : descSetLayouts)
     setLayoutInfos.push_back(&info.m_DescSetLayout[setLayout]);
 
-  shad.ProcessStaticDescriptorAccess(info.pushConstantDescriptorStorage,
-                                     resourceMan->GetOriginalID(id), staticDescriptorAccess,
-                                     setLayoutInfos);
+  ProcessStaticDescriptorAccess(resourceMan, shad.refl, id, staticDescriptorAccess, setLayoutInfos);
 }
 
 void VulkanCreationInfo::Pipeline::Init(VulkanResourceManager *resourceMan,
                                         VulkanCreationInfo &info, ResourceId id,
                                         const VkGraphicsPipelineCreateInfo *pCreateInfo)
 {
-  flags = pCreateInfo->flags;
+  const VkPipelineCreateFlags2CreateInfo *createFlags2 =
+      (const VkPipelineCreateFlags2CreateInfo *)FindNextStruct(
+          pCreateInfo, VK_STRUCTURE_TYPE_PIPELINE_CREATE_FLAGS_2_CREATE_INFO);
+
+  flags = createFlags2 ? createFlags2->flags : pCreateInfo->flags;
+  useCreateFlags2 = createFlags2 != NULL;
 
   graphicsPipe = true;
 
@@ -1086,7 +1217,7 @@ void VulkanCreationInfo::Pipeline::Init(VulkanResourceManager *resourceMan,
   if(graphicsLibraryCreate)
     availStages = graphicsLibraryCreate->flags;
 
-  vertLayout = fragLayout = GetResID(pCreateInfo->layout);
+  ownLayout = vertLayout = fragLayout = GetResID(pCreateInfo->layout);
   renderpass = GetResID(pCreateInfo->renderPass);
   subpass = pCreateInfo->subpass;
 
@@ -1108,6 +1239,28 @@ void VulkanCreationInfo::Pipeline::Init(VulkanResourceManager *resourceMan,
     depthFormat = VK_FORMAT_UNDEFINED;
     stencilFormat = VK_FORMAT_UNDEFINED;
   }
+  const VkCustomResolveCreateInfoEXT *customResInfo =
+      (const VkCustomResolveCreateInfoEXT *)FindNextStruct(
+          pCreateInfo, VK_STRUCTURE_TYPE_CUSTOM_RESOLVE_CREATE_INFO_EXT);
+  if(customResInfo)
+  {
+    hasCustomResCreateInfo = true;
+    customResCreateInfo.customResolve = (customResInfo->customResolve == VK_TRUE);
+    customResCreateInfo.colorFormats.assign(customResInfo->pColorAttachmentFormats,
+                                            customResInfo->colorAttachmentCount);
+    customResCreateInfo.depthFormat = customResInfo->depthAttachmentFormat;
+    customResCreateInfo.stencilFormat = customResInfo->stencilAttachmentFormat;
+  }
+  else
+  {
+    hasCustomResCreateInfo = false;
+    customResCreateInfo.customResolve = false;
+    customResCreateInfo.colorFormats.clear();
+    customResCreateInfo.depthFormat = VK_FORMAT_UNDEFINED;
+    customResCreateInfo.stencilFormat = VK_FORMAT_UNDEFINED;
+  }
+
+  dynamicRenderingLocalRead.Init((const VkBaseInStructure *)pCreateInfo);
 
   RDCEraseEl(dynamicStates);
   if(pCreateInfo->pDynamicState)
@@ -1133,6 +1286,20 @@ void VulkanCreationInfo::Pipeline::Init(VulkanResourceManager *resourceMan,
       dynamicStates[VkDynamicScissor] = false;
   }
 
+  vertexInputRobustness = VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DEVICE_DEFAULT;
+  const VkPipelineRobustnessCreateInfo *robustness =
+      (const VkPipelineRobustnessCreateInfo *)FindNextStruct(
+          pCreateInfo, VK_STRUCTURE_TYPE_PIPELINE_ROBUSTNESS_CREATE_INFO);
+  if(robustness)
+    vertexInputRobustness = robustness->vertexInputs;
+
+  maxFragmentDensityMapLayers = VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DEVICE_DEFAULT;
+  const VkPipelineFragmentDensityMapLayeredCreateInfoVALVE *layered =
+      (const VkPipelineFragmentDensityMapLayeredCreateInfoVALVE *)FindNextStruct(
+          pCreateInfo, VK_STRUCTURE_TYPE_PIPELINE_FRAGMENT_DENSITY_MAP_LAYERED_CREATE_INFO_VALVE);
+  if(layered)
+    maxFragmentDensityMapLayers = layered->maxFragmentDensityMapLayers;
+
   // VkPipelineShaderStageCreateInfo
   for(uint32_t i = 0; i < pCreateInfo->stageCount; i++)
   {
@@ -1143,8 +1310,28 @@ void VulkanCreationInfo::Pipeline::Init(VulkanResourceManager *resourceMan,
 
     ShaderEntry &shad = shaders[stageIndex];
 
-    VkPipelineShaderStageRequiredSubgroupSizeCreateInfo *subgroupSize =
-        (VkPipelineShaderStageRequiredSubgroupSizeCreateInfo *)FindNextStruct(
+    shad.storageBufferRobustness = shad.uniformBufferRobustness =
+        VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DEVICE_DEFAULT;
+    shad.imageRobustness = VK_PIPELINE_ROBUSTNESS_IMAGE_BEHAVIOR_DEVICE_DEFAULT;
+
+    const VkPipelineRobustnessCreateInfo *shaderRobustness =
+        (const VkPipelineRobustnessCreateInfo *)FindNextStruct(
+            &pCreateInfo->pStages[i], VK_STRUCTURE_TYPE_PIPELINE_ROBUSTNESS_CREATE_INFO);
+
+    // If VkPipelineRobustnessCreateInfo is specified for both a pipeline and a pipeline stage, the
+    // VkPipelineRobustnessCreateInfo specified for the pipeline stage will take precedence.
+    if(shaderRobustness == NULL)
+      shaderRobustness = robustness;
+
+    if(shaderRobustness)
+    {
+      shad.storageBufferRobustness = shaderRobustness->storageBuffers;
+      shad.uniformBufferRobustness = shaderRobustness->uniformBuffers;
+      shad.imageRobustness = shaderRobustness->images;
+    }
+
+    const VkPipelineShaderStageRequiredSubgroupSizeCreateInfo *subgroupSize =
+        (const VkPipelineShaderStageRequiredSubgroupSizeCreateInfo *)FindNextStruct(
             &pCreateInfo->pStages[i],
             VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO);
     if(subgroupSize)
@@ -1153,6 +1340,7 @@ void VulkanCreationInfo::Pipeline::Init(VulkanResourceManager *resourceMan,
     shad.module = shadid;
     shad.entryPoint = pCreateInfo->pStages[i].pName;
     shad.stage = ShaderStage(stageIndex);
+    shad.flags = pCreateInfo->pStages[i].flags;
 
     ShaderModuleReflectionKey key(shad.stage, shad.entryPoint, ResourceId());
 
@@ -1178,7 +1366,7 @@ void VulkanCreationInfo::Pipeline::Init(VulkanResourceManager *resourceMan,
 
     ShaderModuleReflection &reflData = info.m_ShaderModule[shadid].m_Reflections[key];
 
-    reflData.Init(resourceMan, shadid, info.m_ShaderModule[shadid].spirv, shad.entryPoint,
+    reflData.Init(resourceMan, info, shadid, info.m_ShaderModule[shadid].spirv, shad.entryPoint,
                   pCreateInfo->pStages[i].stage, shad.specialization);
 
     shad.refl = reflData.refl;
@@ -1201,15 +1389,15 @@ void VulkanCreationInfo::Pipeline::Init(VulkanResourceManager *resourceMan,
     }
 
     // if there's a divisors struct, apply them now
-    const VkPipelineVertexInputDivisorStateCreateInfoKHR *divisors =
-        (const VkPipelineVertexInputDivisorStateCreateInfoKHR *)FindNextStruct(
+    const VkPipelineVertexInputDivisorStateCreateInfo *divisors =
+        (const VkPipelineVertexInputDivisorStateCreateInfo *)FindNextStruct(
             pCreateInfo->pVertexInputState,
-            VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_DIVISOR_STATE_CREATE_INFO_KHR);
+            VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_DIVISOR_STATE_CREATE_INFO);
     if(divisors)
     {
       for(uint32_t b = 0; b < divisors->vertexBindingDivisorCount; b++)
       {
-        const VkVertexInputBindingDivisorDescriptionKHR &div = divisors->pVertexBindingDivisors[b];
+        const VkVertexInputBindingDivisorDescription &div = divisors->pVertexBindingDivisors[b];
 
         if(div.binding < vertexBindings.size())
           vertexBindings[div.binding].instanceDivisor = div.divisor;
@@ -1260,13 +1448,22 @@ void VulkanCreationInfo::Pipeline::Init(VulkanResourceManager *resourceMan,
     viewportCount = 0;
 
   viewports.resize(viewportCount);
-  scissors.resize(viewportCount);
 
   for(uint32_t i = 0; i < viewportCount; i++)
   {
     if(pCreateInfo->pViewportState->pViewports)
       viewports[i] = pCreateInfo->pViewportState->pViewports[i];
+  }
 
+  if(pCreateInfo->pViewportState)
+    scissorCount = pCreateInfo->pViewportState->scissorCount;
+  else
+    scissorCount = 0;
+
+  scissors.resize(scissorCount);
+
+  for(uint32_t i = 0; i < scissorCount; i++)
+  {
     if(pCreateInfo->pViewportState->pScissors)
       scissors[i] = pCreateInfo->pViewportState->pScissors[i];
   }
@@ -1368,15 +1565,15 @@ void VulkanCreationInfo::Pipeline::Init(VulkanResourceManager *resourceMan,
     extraPrimitiveOverestimationSize = conservRast->extraPrimitiveOverestimationSize;
   }
 
-  // VkPipelineRasterizationLineStateCreateInfoKHR
-  lineRasterMode = VK_LINE_RASTERIZATION_MODE_DEFAULT_KHR;
+  // VkPipelineRasterizationLineStateCreateInfo
+  lineRasterMode = VK_LINE_RASTERIZATION_MODE_DEFAULT;
   stippleEnabled = false;
   stippleFactor = stipplePattern = 0;
 
-  const VkPipelineRasterizationLineStateCreateInfoKHR *lineRasterState =
-      (const VkPipelineRasterizationLineStateCreateInfoKHR *)FindNextStruct(
+  const VkPipelineRasterizationLineStateCreateInfo *lineRasterState =
+      (const VkPipelineRasterizationLineStateCreateInfo *)FindNextStruct(
           pCreateInfo->pRasterizationState,
-          VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_LINE_STATE_CREATE_INFO_KHR);
+          VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_LINE_STATE_CREATE_INFO);
   if(lineRasterState)
   {
     lineRasterMode = lineRasterState->lineRasterizationMode;
@@ -1578,10 +1775,16 @@ void VulkanCreationInfo::Pipeline::Init(VulkanResourceManager *resourceMan,
           shaders[i] = pipeInfo.shaders[i];
           info.m_ShaderModule[shaders[i].module].m_PipeReferences[id] = pipeid;
         }
+        for(uint32_t i : {(uint32_t)ShaderStage::Task, (uint32_t)ShaderStage::Mesh})
+        {
+          shaders[i] = pipeInfo.shaders[i];
+          info.m_ShaderModule[shaders[i].module].m_PipeReferences[id] = pipeid;
+        }
 
         vertLayout = pipeInfo.vertLayout;
 
         viewportCount = pipeInfo.viewportCount;
+        scissorCount = pipeInfo.scissorCount;
         viewports = pipeInfo.viewports;
         scissors = pipeInfo.scissors;
 
@@ -1645,6 +1848,8 @@ void VulkanCreationInfo::Pipeline::Init(VulkanResourceManager *resourceMan,
         shadingRateCombiners[0] = pipeInfo.shadingRateCombiners[0];
         shadingRateCombiners[1] = pipeInfo.shadingRateCombiners[1];
 
+        dynamicRenderingLocalRead.CopyInputIndices(pipeInfo.dynamicRenderingLocalRead);
+
         flags |= pipeInfo.flags;
       }
 
@@ -1673,6 +1878,8 @@ void VulkanCreationInfo::Pipeline::Init(VulkanResourceManager *resourceMan,
         colorFormats = pipeInfo.colorFormats;
         depthFormat = pipeInfo.depthFormat;
         stencilFormat = pipeInfo.stencilFormat;
+
+        dynamicRenderingLocalRead.CopyLocations(pipeInfo.dynamicRenderingLocalRead);
 
         flags |= pipeInfo.flags;
       }
@@ -1742,15 +1949,18 @@ void VulkanCreationInfo::Pipeline::Init(VulkanResourceManager *resourceMan,
     setLayoutInfos.push_back(&info.m_DescSetLayout[setLayout]);
 
   for(const ShaderEntry &shad : shaders)
-    shad.ProcessStaticDescriptorAccess(info.pushConstantDescriptorStorage,
-                                       resourceMan->GetOriginalID(id), staticDescriptorAccess,
-                                       setLayoutInfos);
+    ProcessStaticDescriptorAccess(resourceMan, shad.refl, id, staticDescriptorAccess, setLayoutInfos);
 }
 
 void VulkanCreationInfo::Pipeline::Init(VulkanResourceManager *resourceMan, VulkanCreationInfo &info,
                                         ResourceId id, const VkComputePipelineCreateInfo *pCreateInfo)
 {
-  flags = pCreateInfo->flags;
+  const VkPipelineCreateFlags2CreateInfo *createFlags2 =
+      (const VkPipelineCreateFlags2CreateInfo *)FindNextStruct(
+          pCreateInfo, VK_STRUCTURE_TYPE_PIPELINE_CREATE_FLAGS_2_CREATE_INFO);
+
+  flags = createFlags2 ? createFlags2->flags : pCreateInfo->flags;
+  useCreateFlags2 = createFlags2 != NULL;
 
   graphicsPipe = false;
 
@@ -1760,13 +1970,33 @@ void VulkanCreationInfo::Pipeline::Init(VulkanResourceManager *resourceMan, Vulk
 
   // need to figure out which states are valid to be NULL
 
+  // If VkPipelineRobustnessCreateInfo is specified for both a pipeline and a pipeline stage, the
+  // VkPipelineRobustnessCreateInfo specified for the pipeline stage will take precedence.
+  const VkPipelineRobustnessCreateInfo *shaderRobustness =
+      (const VkPipelineRobustnessCreateInfo *)FindNextStruct(
+          &pCreateInfo->stage, VK_STRUCTURE_TYPE_PIPELINE_ROBUSTNESS_CREATE_INFO);
+
+  if(shaderRobustness == NULL)
+    shaderRobustness = (const VkPipelineRobustnessCreateInfo *)FindNextStruct(
+        pCreateInfo, VK_STRUCTURE_TYPE_PIPELINE_ROBUSTNESS_CREATE_INFO);
+
   // VkPipelineShaderStageCreateInfo
   {
     ResourceId shadid = GetResID(pCreateInfo->stage.module);
     ShaderEntry &shad = shaders[5];    // 5 is the compute shader's index (VS, TCS, TES, GS, FS, CS)
 
-    VkPipelineShaderStageRequiredSubgroupSizeCreateInfo *subgroupSize =
-        (VkPipelineShaderStageRequiredSubgroupSizeCreateInfo *)FindNextStruct(
+    shad.storageBufferRobustness = shad.uniformBufferRobustness =
+        VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DEVICE_DEFAULT;
+    shad.imageRobustness = VK_PIPELINE_ROBUSTNESS_IMAGE_BEHAVIOR_DEVICE_DEFAULT;
+    if(shaderRobustness)
+    {
+      shad.storageBufferRobustness = shaderRobustness->storageBuffers;
+      shad.uniformBufferRobustness = shaderRobustness->uniformBuffers;
+      shad.imageRobustness = shaderRobustness->images;
+    }
+
+    const VkPipelineShaderStageRequiredSubgroupSizeCreateInfo *subgroupSize =
+        (const VkPipelineShaderStageRequiredSubgroupSizeCreateInfo *)FindNextStruct(
             &pCreateInfo->stage,
             VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO);
     if(subgroupSize)
@@ -1775,6 +2005,7 @@ void VulkanCreationInfo::Pipeline::Init(VulkanResourceManager *resourceMan, Vulk
     shad.module = shadid;
     shad.entryPoint = pCreateInfo->stage.pName;
     shad.stage = ShaderStage::Compute;
+    shad.flags = pCreateInfo->stage.flags;
 
     ShaderModuleReflectionKey key(ShaderStage::Compute, shad.entryPoint, ResourceId());
 
@@ -1800,7 +2031,7 @@ void VulkanCreationInfo::Pipeline::Init(VulkanResourceManager *resourceMan, Vulk
 
     ShaderModuleReflection &reflData = info.m_ShaderModule[shadid].m_Reflections[key];
 
-    reflData.Init(resourceMan, shadid, info.m_ShaderModule[shadid].spirv, shad.entryPoint,
+    reflData.Init(resourceMan, info, shadid, info.m_ShaderModule[shadid].spirv, shad.entryPoint,
                   pCreateInfo->stage.stage, shad.specialization);
 
     shad.refl = reflData.refl;
@@ -1815,6 +2046,7 @@ void VulkanCreationInfo::Pipeline::Init(VulkanResourceManager *resourceMan, Vulk
   tessellationDomainOrigin = VK_TESSELLATION_DOMAIN_ORIGIN_UPPER_LEFT;
 
   viewportCount = 0;
+  scissorCount = 0;
 
   // VkPipelineRasterStateCreateInfo
   depthClampEnable = false;
@@ -1852,16 +2084,19 @@ void VulkanCreationInfo::Pipeline::Init(VulkanResourceManager *resourceMan, Vulk
     setLayoutInfos.push_back(&info.m_DescSetLayout[setLayout]);
 
   for(const ShaderEntry &shad : shaders)
-    shad.ProcessStaticDescriptorAccess(info.pushConstantDescriptorStorage,
-                                       resourceMan->GetOriginalID(id), staticDescriptorAccess,
-                                       setLayoutInfos);
+    ProcessStaticDescriptorAccess(resourceMan, shad.refl, id, staticDescriptorAccess, setLayoutInfos);
 }
 
 void VulkanCreationInfo::Pipeline::Init(VulkanResourceManager *resourceMan,
                                         VulkanCreationInfo &info, ResourceId id,
                                         const VkRayTracingPipelineCreateInfoKHR *pCreateInfo)
 {
-  flags = pCreateInfo->flags;
+  const VkPipelineCreateFlags2CreateInfo *createFlags2 =
+      (const VkPipelineCreateFlags2CreateInfo *)FindNextStruct(
+          pCreateInfo, VK_STRUCTURE_TYPE_PIPELINE_CREATE_FLAGS_2_CREATE_INFO);
+
+  flags = createFlags2 ? createFlags2->flags : pCreateInfo->flags;
+  useCreateFlags2 = createFlags2 != NULL;
 
   graphicsPipe = false;
 
@@ -1877,6 +2112,7 @@ void VulkanCreationInfo::Pipeline::Init(VulkanResourceManager *resourceMan,
   tessellationDomainOrigin = VK_TESSELLATION_DOMAIN_ORIGIN_UPPER_LEFT;
 
   viewportCount = 0;
+  scissorCount = 0;
 
   // VkPipelineRasterStateCreateInfo
   depthClampEnable = false;
@@ -2042,6 +2278,7 @@ void VulkanCreationInfo::RenderPass::Init(VulkanResourceManager *resourceMan,
           dst.multiviews.push_back(i);
       }
     }
+    dst.customResolve = (src.flags & VK_SUBPASS_DESCRIPTION_CUSTOM_RESOLVE_BIT_EXT) != 0;
   }
 
   for(uint32_t i = 0; i < pCreateInfo->dependencyCount; i++)
@@ -2208,6 +2445,7 @@ void VulkanCreationInfo::RenderPass::Init(VulkanResourceManager *resourceMan,
       if(src.viewMask & (1 << i))
         dst.multiviews.push_back(i);
     }
+    dst.customResolve = (src.flags & VK_SUBPASS_DESCRIPTION_CUSTOM_RESOLVE_BIT_EXT) != 0;
   }
 }
 
@@ -2259,6 +2497,15 @@ void VulkanCreationInfo::Memory::Init(VulkanResourceManager *resourceMan, Vulkan
 {
   memoryTypeIndex = pAllocInfo->memoryTypeIndex;
   allocSize = wholeMemBufSize = pAllocInfo->allocationSize;
+
+  const VkMemoryOpaqueCaptureAddressAllocateInfo *memoryDeviceAddress =
+      (const VkMemoryOpaqueCaptureAddressAllocateInfo *)FindNextStruct(
+          pAllocInfo, VK_STRUCTURE_TYPE_MEMORY_OPAQUE_CAPTURE_ADDRESS_ALLOCATE_INFO);
+
+  if(memoryDeviceAddress)
+  {
+    opaqueAddr = memoryDeviceAddress->opaqueCaptureAddress;
+  }
 }
 
 void VulkanCreationInfo::Memory::SimplifyBindings()
@@ -2300,7 +2547,7 @@ void VulkanCreationInfo::Buffer::Init(VulkanResourceManager *resourceMan, Vulkan
                                       const VkBufferCreateInfo *pCreateInfo,
                                       VkMemoryRequirements origMrq)
 {
-  usage = pCreateInfo->usage;
+  usage = GetBufferUsageFlags(pCreateInfo);
   size = pCreateInfo->size;
   gpuAddress = 0;
 
@@ -2343,7 +2590,8 @@ void VulkanCreationInfo::Image::Init(VulkanResourceManager *resourceMan, VulkanC
 
   if(FindNextStruct(pCreateInfo, VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO_NV) ||
      FindNextStruct(pCreateInfo, VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO) ||
-     FindNextStruct(pCreateInfo, VK_STRUCTURE_TYPE_EXTERNAL_FORMAT_ANDROID))
+     FindNextStruct(pCreateInfo, VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_LIST_CREATE_INFO_EXT) ||
+     FindNextStruct(pCreateInfo, VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT))
   {
     external = true;
   }
@@ -2361,6 +2609,8 @@ void VulkanCreationInfo::Image::Init(VulkanResourceManager *resourceMan, VulkanC
     creationFlags |= TextureCategory::ShaderReadWrite;
 
   cube = (pCreateInfo->flags & VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT) ? true : false;
+
+  address = 0;
 }
 
 void VulkanCreationInfo::Sampler::Init(VulkanResourceManager *resourceMan, VulkanCreationInfo &info,
@@ -2497,6 +2747,8 @@ void VulkanCreationInfo::ImageView::Init(VulkanResourceManager *resourceMan, Vul
   {
     minLOD = minLODInfo->minLod;
   }
+
+  isDepthImage = !!(info.m_Image[image].creationFlags & TextureCategory::DepthTarget);
 }
 
 void VulkanCreationInfo::ShaderModule::Init(VulkanResourceManager *resourceMan,
@@ -2513,11 +2765,13 @@ void VulkanCreationInfo::ShaderModule::Init(VulkanResourceManager *resourceMan,
     RDCASSERT(pCreateInfo->codeSize % sizeof(uint32_t) == 0);
     spirv.Parse(rdcarray<uint32_t>((uint32_t *)(pCreateInfo->pCode),
                                    pCreateInfo->codeSize / sizeof(uint32_t)));
+    initialSpirv.clear();
   }
 }
 
-void VulkanCreationInfo::ShaderModule::Reinit()
+bool VulkanCreationInfo::ShaderModule::Reinit()
 {
+  rdcstr loadingLog;
   bool lz4 = false;
 
   rdcstr originalPath = unstrippedPath;
@@ -2535,7 +2789,20 @@ void VulkanCreationInfo::ShaderModule::Reinit()
 
   size_t numSearchPaths = searchPaths.size();
 
+  rdcstr foundFname = originalPath;
   rdcstr foundPath;
+
+  loadingLog = StringFormat::Fmt("Shader filepath '%s'\n", originalPath.c_str());
+  if(numSearchPaths > 0)
+  {
+    loadingLog += rdcstr("\nNon-Recursive Search Path(s):\n");
+    for(size_t i = 0; i < numSearchPaths; i++)
+      loadingLog += StringFormat::Fmt("'%s'\n", searchPaths[i].c_str());
+  }
+  else
+  {
+    loadingLog += rdcstr("\nNo Non-Recursive Search Paths\n");
+  }
 
   // keep searching until we've exhausted all possible path options, or we've found a file that
   // opens
@@ -2547,8 +2814,11 @@ void VulkanCreationInfo::ShaderModule::Reinit()
     {
       if(i == 0)
       {
+        loadingLog += rdcstr("\n");
         originalShaderFile = FileIO::fopen(originalPath, FileIO::ReadBinary);
         foundPath = originalPath;
+        if(originalShaderFile == NULL)
+          loadingLog += StringFormat::Fmt("File not found using filepath '%s'\n", foundPath.c_str());
         continue;
       }
       else
@@ -2556,6 +2826,9 @@ void VulkanCreationInfo::ShaderModule::Reinit()
         const rdcstr &searchPath = searchPaths[i - 1];
         foundPath = searchPath + "/" + originalPath;
         originalShaderFile = FileIO::fopen(foundPath, FileIO::ReadBinary);
+        if(originalShaderFile == NULL)
+          loadingLog += StringFormat::Fmt(
+              "File not found in search directory using filepath '%s'\n", foundPath.c_str());
       }
     }
 
@@ -2577,19 +2850,43 @@ void VulkanCreationInfo::ShaderModule::Reinit()
     }
   }
 
+  // Try to retrieve debug file from the externally referenced files in the capture
+  bytebuf debugBytecode;
   if(originalShaderFile == NULL)
-    return;
-
-  FileIO::fseek64(originalShaderFile, 0L, SEEK_END);
-  uint64_t originalShaderSize = FileIO::ftell64(originalShaderFile);
-  FileIO::fseek64(originalShaderFile, 0, SEEK_SET);
-
   {
-    bytebuf debugBytecode;
+    if(!RenderDoc::Inst().GetTrackedFileData(foundFname, debugBytecode))
+    {
+      loadingLog += StringFormat::Fmt(
+          "\nFile not found in files embedded in the capture using nickname '%s'\n",
+          foundFname.c_str());
+      debugInfoLoadingLog =
+          StringFormat::Fmt("Did not find debug data for '%s'\n\n", foundFname.c_str());
+      if(!loadingLog.empty())
+      {
+        debugInfoLoadingLog += StringFormat::Fmt("Details\n");
+        debugInfoLoadingLog += StringFormat::Fmt("-------\n\n");
+        debugInfoLoadingLog += loadingLog;
+      }
+      return false;
+    }
+    loadingLog += StringFormat::Fmt(
+        "\nFound debug data from files embedded in the capture using nickname '%s'\n",
+        foundFname.c_str());
+  }
+  else
+  {
+    FileIO::fseek64(originalShaderFile, 0L, SEEK_END);
+    uint64_t originalShaderSize = FileIO::ftell64(originalShaderFile);
+    FileIO::fseek64(originalShaderFile, 0, SEEK_SET);
 
     debugBytecode.resize((size_t)originalShaderSize);
     FileIO::fread(&debugBytecode[0], sizeof(byte), (size_t)originalShaderSize, originalShaderFile);
+    FileIO::fclose(originalShaderFile);
+    originalShaderFile = NULL;
+    loadingLog += StringFormat::Fmt("\nFound debug data using filepath '%s'\n", foundPath.c_str());
+  }
 
+  {
     if(lz4)
     {
       rdcarray<byte> decompressed;
@@ -2612,7 +2909,17 @@ void VulkanCreationInfo::ShaderModule::Reinit()
         if(ret < 0)
         {
           RDCERR("Failed to decompress LZ4 data from %s", foundPath.c_str());
-          return;
+          loadingLog +=
+              StringFormat::Fmt("\nFailed to decompress LZ4 data from '%s'\n", foundPath.c_str());
+          debugInfoLoadingLog =
+              StringFormat::Fmt("Did not find debug data for '%s'\n\n", foundFname.c_str());
+          if(!loadingLog.empty())
+          {
+            debugInfoLoadingLog += StringFormat::Fmt("Details\n");
+            debugInfoLoadingLog += StringFormat::Fmt("-------\n\n");
+            debugInfoLoadingLog += loadingLog;
+          }
+          return false;
         }
       }
 
@@ -2630,15 +2937,70 @@ void VulkanCreationInfo::ShaderModule::Reinit()
 
     if(!reflTest.GetSPIRV().empty())
     {
+      if(initialSpirv.isEmpty())
+        initialSpirv = spirv.GetSPIRV();
       spirv = reflTest;
+      RenderDoc::Inst().AddTrackedFileReference(foundFname, foundPath);
+      loadingLog += StringFormat::Fmt("Debug data parsed successfully (%u bytes)\n",
+                                      (uint32_t)debugBytecode.size());
+      debugInfoLoadingLog = StringFormat::Fmt("Found debug data for '%s'\n\n", foundFname.c_str());
+      if(!loadingLog.empty())
+      {
+        debugInfoLoadingLog += StringFormat::Fmt("Details\n");
+        debugInfoLoadingLog += StringFormat::Fmt("-------\n\n");
+        debugInfoLoadingLog += loadingLog;
+      }
+      return true;
+    }
+    else
+    {
+      loadingLog += StringFormat::Fmt("Debug data failed to parse (%u bytes)\n",
+                                      (uint32_t)debugBytecode.size());
+      debugInfoLoadingLog =
+          StringFormat::Fmt("Did not find debug data for '%s'\n\n", foundFname.c_str());
     }
   }
+  if(!loadingLog.empty())
+  {
+    debugInfoLoadingLog += StringFormat::Fmt("Details\n");
+    debugInfoLoadingLog += StringFormat::Fmt("-------\n\n");
+    debugInfoLoadingLog += loadingLog;
+  }
+  return false;
+}
 
-  FileIO::fclose(originalShaderFile);
+void VulkanCreationInfo::ShaderModule::Reload(VulkanResourceManager *resourceMan,
+                                              const VulkanCreationInfo &info, ResourceId id)
+{
+  // Nothing to do if the shader does not have a separate debug info path
+  if(unstrippedPath.empty())
+    return;
+
+  rdcarray<uint32_t> currentSpirv = spirv.GetSPIRV();
+
+  // Loading debug data failed : reset the spirv to the initial spirv
+  if(!Reinit())
+  {
+    if(initialSpirv.isEmpty())
+      return;
+    if(currentSpirv == initialSpirv)
+      return;
+    rdcspv::Reflector newSpirv;
+    newSpirv.Parse(initialSpirv);
+    spirv = newSpirv;
+  }
+
+  // Nothing to do if the shader spirv did not change
+  if(spirv.GetSPIRV() == currentSpirv)
+    return;
+
+  for(auto it = m_Reflections.begin(); it != m_Reflections.end(); ++it)
+    it->second.Reload(resourceMan, info, id, spirv);
 }
 
 void VulkanCreationInfo::ShaderModuleReflection::Init(VulkanResourceManager *resourceMan,
-                                                      ResourceId id, const rdcspv::Reflector &spv,
+                                                      const VulkanCreationInfo &info, ResourceId id,
+                                                      const rdcspv::Reflector &spv,
                                                       const rdcstr &entry,
                                                       VkShaderStageFlagBits stage,
                                                       const rdcarray<SpecConstant> &specInfo)
@@ -2651,7 +3013,9 @@ void VulkanCreationInfo::ShaderModuleReflection::Init(VulkanResourceManager *res
     spv.MakeReflection(GraphicsAPI::Vulkan, ShaderStage(stageIndex), entryPoint, specInfo, *refl,
                        patchData);
 
-    refl->resourceId = resourceMan->GetOriginalID(id);
+    refl->resourceId = id;
+    refl->debugInfo.debugInfoLoadingLog = info.m_ShaderModule.at(id).debugInfoLoadingLog;
+    specConstantData = specInfo;
   }
 }
 
@@ -2659,6 +3023,21 @@ void VulkanCreationInfo::ShaderModuleReflection::PopulateDisassembly(const rdcsp
 {
   if(disassembly.empty())
     disassembly = spirv.Disassemble(refl->entryPoint, instructionLines);
+}
+
+void VulkanCreationInfo::ShaderModuleReflection::Reload(VulkanResourceManager *resourceMan,
+                                                        const VulkanCreationInfo &info,
+                                                        ResourceId id, const rdcspv::Reflector &spv)
+{
+  const rdcstr entry = entryPoint;
+  entryPoint.clear();
+  disassembly.clear();
+  instructionLines.clear();
+  // refl : pointer is stored in other structures, can't delete it
+  *refl = ShaderReflection();
+  patchData = SPIRVPatchData();
+  VkShaderStageFlagBits stage = (VkShaderStageFlagBits)ShaderMaskFromIndex((size_t)(stageIndex));
+  Init(resourceMan, info, id, spv, entry, stage, specConstantData);
 }
 
 void VulkanCreationInfo::QueryPool::Init(VulkanResourceManager *resourceMan, VulkanCreationInfo &info,
@@ -2756,10 +3135,7 @@ void VulkanCreationInfo::DescSetPool::CreateOverflow(VkDevice device,
   VkResult ret = ObjDisp(device)->CreateDescriptorPool(Unwrap(device), &poolInfo, NULL, &pool);
   RDCASSERTEQUAL(ret, VK_SUCCESS);
 
-  ResourceId poolid = resourceMan->WrapResource(Unwrap(device), pool);
-
-  // register as a live-only resource, so it is cleaned up properly
-  resourceMan->AddLiveResource(poolid, pool);
+  ResourceId poolid = resourceMan->WrapResource(ResourceId(), Unwrap(device), pool);
 
   overflow.push_back(pool);
 }
@@ -2772,6 +3148,55 @@ void VulkanCreationInfo::AccelerationStructure::Init(
   offset = pCreateInfo->offset;
   size = pCreateInfo->size;
   type = pCreateInfo->type;
+}
+
+const VulkanCreationInfo::PipelineLayout &VulkanCreationInfo::GetPipelineLayoutInfo(ResourceId rp) const
+{
+  auto it = m_PipelineLayout.find(rp);
+  RDCASSERT(it != m_PipelineLayout.end());
+  return it->second;
+}
+
+const DescSetLayout &VulkanCreationInfo::GetDescSetLayout(ResourceId dsl) const
+{
+  auto it = m_DescSetLayout.find(dsl);
+  RDCASSERT(it != m_DescSetLayout.end());
+  return it->second;
+}
+
+const VulkanCreationInfo::Buffer &VulkanCreationInfo::GetBufferInfo(ResourceId buf) const
+{
+  auto it = m_Buffer.find(buf);
+  RDCASSERT(it != m_Buffer.end());
+  return it->second;
+}
+
+const VulkanCreationInfo::BufferView &VulkanCreationInfo::GetBufferViewInfo(ResourceId bufView) const
+{
+  auto it = m_BufferView.find(bufView);
+  RDCASSERT(it != m_BufferView.end());
+  return it->second;
+}
+
+const VulkanCreationInfo::Image &VulkanCreationInfo::GetImageInfo(ResourceId img) const
+{
+  auto it = m_Image.find(img);
+  RDCASSERT(it != m_Image.end());
+  return it->second;
+}
+
+const VulkanCreationInfo::ImageView &VulkanCreationInfo::GetImageViewInfo(ResourceId imgView) const
+{
+  auto it = m_ImageView.find(imgView);
+  RDCASSERT(it != m_ImageView.end());
+  return it->second;
+}
+
+const VulkanCreationInfo::Sampler &VulkanCreationInfo::GetSamplerInfo(ResourceId samp) const
+{
+  auto it = m_Sampler.find(samp);
+  RDCASSERT(it != m_Sampler.end());
+  return it->second;
 }
 
 void DescUpdateTemplate::Init(VulkanResourceManager *resourceMan, VulkanCreationInfo &info,
@@ -2940,6 +3365,8 @@ void DescUpdateTemplate::Apply(const void *pData, DescUpdateTemplateApplication 
       void *dst = application.inlineData.data() + inlineOffset;
       memcpy(dst, src, inlineWrite.dataSize);
       inlineWrite.pData = dst;
+      inlineOffset += inlineWrite.dataSize;
+      inlineOffset = AlignUp4(inlineOffset);
 
       write.pNext = &inlineWrite;
       write.descriptorCount = entry.descriptorCount;

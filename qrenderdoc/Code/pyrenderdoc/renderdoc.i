@@ -24,6 +24,24 @@
 #include "3rdparty/pythoncapi_compat.h"
 %}
 
+%begin %{
+
+#include <Python.h>
+
+#if PY_VERSION_HEX >= 0x030d0000
+inline PyObject *PyWeakref_GetObject_emu(PyObject *ref)
+{
+  PyObject *ret = NULL;
+  if(PyWeakref_GetRef(ref, &ret) > 0)
+    Py_DECREF(ret);
+  return ret;
+}
+#undef PyWeakref_GET_OBJECT
+#define PyWeakref_GET_OBJECT(x) PyWeakref_GetObject_emu(x)
+#endif
+
+%}
+
 // include header for typed enums (hopefully using PEP435 enums)
 %include <enums.swg>
 
@@ -212,6 +230,21 @@ VA_IGNORE_REST_OF_FILE
 
   // copy the values
   $1.assign(*$input);
+}
+
+%typemap(ret) const ActionDescription * {
+  // for ActionDescription pointers don't apply parent tracking, since these are preserved
+  // in other ways and the linked-list nature of walking them can produce absurdly long
+  // parent chains
+  if (SwigPyObject_Check($result))
+  {
+    SwigPyObject *sobj = (SwigPyObject *)$result;
+    if(sobj->parent)
+    {
+      sobj->parent = NULL;
+      Py_DECREF($self);
+    }
+  }
 }
 
 SIMPLE_TYPEMAPS(rdcstr)
@@ -418,6 +451,7 @@ TEMPLATE_ARRAY_INSTANTIATE(rdcarray, DescriptorLogicalLocation)
 TEMPLATE_ARRAY_INSTANTIATE(rdcarray, UsedDescriptor)
 TEMPLATE_NAMESPACE_ARRAY_INSTANTIATE(rdcarray, VKPipe, DynamicOffset)
 TEMPLATE_NAMESPACE_ARRAY_INSTANTIATE(rdcarray, VKPipe, DescriptorSet)
+TEMPLATE_NAMESPACE_ARRAY_INSTANTIATE(rdcarray, VKPipe, DescriptorBuffer)
 TEMPLATE_NAMESPACE_ARRAY_INSTANTIATE(rdcarray, VKPipe, ImageData)
 TEMPLATE_NAMESPACE_ARRAY_INSTANTIATE(rdcarray, VKPipe, ImageLayout)
 TEMPLATE_NAMESPACE_ARRAY_INSTANTIATE(rdcarray, VKPipe, RenderArea)

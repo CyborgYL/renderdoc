@@ -1,7 +1,7 @@
 /******************************************************************************
  * The MIT License (MIT)
  *
- * Copyright (c) 2019-2024 Baldur Karlsson
+ * Copyright (c) 2016-2026 Baldur Karlsson
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -203,10 +203,9 @@ int main(int argc, char *argv[])
   {
     const char *qpa_plat = getenv("QT_QPA_PLATFORM");
     // if not set or empty, force non-wayland to help go through backwards compatibility path on wayland.
-    char env_set[] = "QT_QPA_PLATFORM=xcb\0";
     if(!qpa_plat || qpa_plat[0] == 0)
     {
-      putenv(env_set);
+      setenv("QT_QPA_PLATFORM", "xcb", 1);
       envChanged = true;
     }
   }
@@ -280,6 +279,11 @@ int main(int argc, char *argv[])
       }
     }
 
+    GlobalEnvironment env;
+    env.enumerateGPUs = false;
+    rdcarray<rdcstr> coreargs;
+    RENDERDOC_InitialiseReplay(env, coreargs);
+
     {
       QCoreApplication application(argc, mod_argv);
       PythonContext::GlobalInit();
@@ -303,7 +307,11 @@ int main(int argc, char *argv[])
       {
         logstream << "Python bindings are consistent.\n";
       }
+
+      PythonContext::GlobalShutdown();
     }
+
+    RENDERDOC_ShutdownReplay();
 
     logbuf.finish();
 
@@ -352,6 +360,10 @@ int main(int argc, char *argv[])
   QCommandLineOption updateFailed(lit("updatefailed"), QString(), lit("errormsg"));
   hideOption(updateFailed);
   parser.addOption(updateFailed);
+
+  QCommandLineOption updateDoneAdmin(lit("updatedone_admin"));
+  hideOption(updateDoneAdmin);
+  parser.addOption(updateDoneAdmin);
 
   QCommandLineOption updateDone(lit("updatedone"));
   hideOption(updateDone);
@@ -405,9 +417,20 @@ int main(int argc, char *argv[])
 
   if(parser.isSet(updateDone))
   {
+    qInfo() << "Finishing update as user";
     updateApplied = true;
 
+    // the renderdoccmd updater that runs us is from the old version, so older versions might be
+    // running us as admin expecting the version number to be updated.
+    // if we're not running as admin, this will immediately exit
     RENDERDOC_UpdateInstalledVersionNumber();
+  }
+
+  if(parser.isSet(updateDoneAdmin))
+  {
+    qInfo() << "Finishing update as admin";
+    RENDERDOC_UpdateInstalledVersionNumber();
+    return 0;
   }
 
   QString remoteHost;
@@ -550,29 +573,6 @@ int main(int argc, char *argv[])
     Resources::Initialise();
 
     GUIInvoke::init();
-
-    {
-      QString homePath = QStandardPaths::writableLocation(QStandardPaths::HomeLocation);
-#if defined(Q_OS_WIN32)
-      QString fn = homePath + lit("/AppData/Local/LunarG/vkconfig/override/");
-#else
-      QString fn = homePath + lit("/.local/share/vulkan/implicit_layer.d/");
-#endif
-      // documentation is unclear, mentions both these files so check both just in case
-      QFileInfo vkconfigcheck1(fn + lit("VkLayerOverride.json"));
-      QFileInfo vkconfigcheck2(fn + lit("VkLayer_Override.json"));
-      if((vkconfigcheck1.exists() && vkconfigcheck1.isFile()) ||
-         (vkconfigcheck2.exists() && vkconfigcheck2.isFile()))
-      {
-        RDDialog::warning(
-            NULL, tr("vkconfig detected - possible incompatibility"),
-            tr("Configuration from 'vkconfig' tool detected.\n\n"
-               "This program has caused problems in the past and it is \n"
-               "strongly recommended that you disable it while using RenderDoc.\n\n"
-               "If this program is not active check the path below for any leftover files:\n\n%1")
-                .arg(fn));
-      }
-    }
 
     {
       GlobalEnvironment env;

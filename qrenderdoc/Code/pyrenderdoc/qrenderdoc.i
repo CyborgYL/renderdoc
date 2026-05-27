@@ -14,6 +14,24 @@
 %}
 
 %begin %{
+
+#include <Python.h>
+
+#if PY_VERSION_HEX >= 0x030d0000
+inline PyObject *PyWeakref_GetObject_emu(PyObject *ref)
+{
+  PyObject *ret = NULL;
+  if(PyWeakref_GetRef(ref, &ret) > 0)
+    Py_DECREF(ret);
+  return ret;
+}
+#undef PyWeakref_GET_OBJECT
+#define PyWeakref_GET_OBJECT(x) PyWeakref_GetObject_emu(x)
+#endif
+
+%}
+
+%begin %{
 #undef slots
 
 #ifndef SWIG_GENERATED
@@ -72,41 +90,10 @@ TEMPLATE_FIXEDARRAY_DECLARE(rdcfixedarray);
 
 // create a wrapper for passing python ICaptureViewer interface implementations to C++
 
-%{
+%wrapper %{
   struct PythonCaptureViewer : public ICaptureViewer
   {
-    PythonCaptureViewer(PyObject *s) : self(s)
-    {
-      Py_INCREF(self);
-      
-      StackExceptionHandler ex;
-
-      PyObject *meth = NULL;
-
-      {
-        meth = PyObject_GetAttrString(self, "OnCaptureLoaded");
-        m_OnCaptureLoaded = ConvertFunc<std::function<void()>>("ICaptureViewer::OnCaptureLoaded", meth, ex);
-        Py_XDECREF(meth);
-      }
-
-      {
-        meth = PyObject_GetAttrString(self, "OnCaptureClosed");
-        m_OnCaptureClosed = ConvertFunc<std::function<void()>>("ICaptureViewer::OnCaptureClosed", meth, ex);
-        Py_XDECREF(meth);
-      }
-
-      {
-        meth = PyObject_GetAttrString(self, "OnSelectedEventChanged");
-        m_OnSelectedEventChanged = ConvertFunc<std::function<void(uint32_t)>>("ICaptureViewer::OnSelectedEventChanged", meth, ex);
-        Py_XDECREF(meth);
-      }
-
-      {
-        meth = PyObject_GetAttrString(self, "OnEventChanged");
-        m_OnEventChanged = ConvertFunc<std::function<void(uint32_t)>>("ICaptureViewer::OnEventChanged", meth, ex);
-        Py_XDECREF(meth);
-      }
-    }
+    PythonCaptureViewer(PyObject *s);
 
     virtual ~PythonCaptureViewer()
     {
@@ -263,6 +250,76 @@ QWidget *UnwrapBareQWidget(PyObject *obj)
   }
 
   return ret;
+}
+
+PythonCaptureViewer::PythonCaptureViewer(PyObject *s)
+{
+  self = s;
+  Py_INCREF(self);
+  
+  StackExceptionHandler ex;
+
+  PyObject *meth = NULL;
+
+  {
+    meth = PyObject_GetAttrString(self, "OnCaptureLoaded");
+    if(PyCFunction_Check(meth) && PyCFunction_GetFunction(meth) == &_wrap_CaptureViewer_OnCaptureLoaded)
+    {
+      Py_XDECREF(meth);
+      meth = NULL;
+    }
+
+    if(meth)
+    {
+      m_OnCaptureLoaded = ConvertFunc<std::function<void()>>("ICaptureViewer::OnCaptureLoaded", meth, ex);
+      Py_XDECREF(meth);
+    }
+  }
+
+  {
+    meth = PyObject_GetAttrString(self, "OnCaptureClosed");
+    if(PyCFunction_Check(meth) && PyCFunction_GetFunction(meth) == &_wrap_CaptureViewer_OnCaptureClosed)
+    {
+      Py_XDECREF(meth);
+      meth = NULL;
+    }
+
+    if(meth)
+    {
+      m_OnCaptureClosed = ConvertFunc<std::function<void()>>("ICaptureViewer::OnCaptureClosed", meth, ex);
+      Py_XDECREF(meth);
+    }
+  }
+
+  {
+    meth = PyObject_GetAttrString(self, "OnSelectedEventChanged");
+    if(PyCFunction_Check(meth) && PyCFunction_GetFunction(meth) == &_wrap_CaptureViewer_OnSelectedEventChanged)
+    {
+      Py_XDECREF(meth);
+      meth = NULL;
+    }
+
+    if(meth)
+    {
+      m_OnSelectedEventChanged = ConvertFunc<std::function<void(uint32_t)>>("ICaptureViewer::OnSelectedEventChanged", meth, ex);
+      Py_XDECREF(meth);
+    }
+  }
+
+  {
+    meth = PyObject_GetAttrString(self, "OnEventChanged");
+    if(PyCFunction_Check(meth) && PyCFunction_GetFunction(meth) == &_wrap_CaptureViewer_OnEventChanged)
+    {
+      Py_XDECREF(meth);
+      meth = NULL;
+    }
+
+    if(meth)
+    {
+      m_OnEventChanged = ConvertFunc<std::function<void(uint32_t)>>("ICaptureViewer::OnEventChanged", meth, ex);
+      Py_XDECREF(meth);
+    }
+  }
 }
 
 %}

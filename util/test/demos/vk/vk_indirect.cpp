@@ -1,7 +1,7 @@
 /******************************************************************************
  * The MIT License (MIT)
  *
- * Copyright (c) 2019-2024 Baldur Karlsson
+ * Copyright (c) 2018-2026 Baldur Karlsson
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -113,7 +113,14 @@ void main()
           VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
       };
 
-      feats.drawIndirectCount = VK_TRUE;
+      VkPhysicalDeviceVulkan12Features vk12avail = {
+          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
+      };
+
+      getPhysFeatures2(&vk12avail);
+
+      if(vk12avail.drawIndirectCount)
+        feats.drawIndirectCount = VK_TRUE;
 
       devInfoNext = &feats;
     }
@@ -634,9 +641,9 @@ void main()
         vkCmdExecuteCommands(primary, 1, &count_secondary);
       }
 
-      setMarker(primary, "Secondary: Final");
-
       vkCmdEndRenderPass(primary);
+
+      setMarker(primary, "Secondary: Final");
 
       vkh::cmdPipelineBarrier(
           primary, {},

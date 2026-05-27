@@ -1,7 +1,7 @@
 /******************************************************************************
  * The MIT License (MIT)
  *
- * Copyright (c) 2019-2024 Baldur Karlsson
+ * Copyright (c) 2015-2026 Baldur Karlsson
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -131,6 +131,8 @@ MainWindow::MainWindow(ICaptureContext &ctx) : QMainWindow(NULL), ui(new Ui::Mai
 
   setAcceptDrops(true);
 
+  QObject::connect(ui->menu_Tools, &QMenu::aboutToShow, this, &MainWindow::updateToolsMenuOptions);
+
   QObject::connect(ui->action_Load_Default_Layout, &QAction::triggered, this,
                    &MainWindow::loadLayout_triggered);
   QObject::connect(ui->action_Load_Layout_1, &QAction::triggered, this,
@@ -227,6 +229,56 @@ MainWindow::MainWindow(ICaptureContext &ctx) : QMainWindow(NULL), ui(new Ui::Mai
   m_MessageTick.setInterval(175);
   m_MessageTick.start();
 
+  QTimer *vkconfigCheckTimer = new QTimer(this);
+  QObject::connect(vkconfigCheckTimer, &QTimer::timeout, [vkconfigCheckTimer]() {
+    QString homePath = QStandardPaths::writableLocation(QStandardPaths::HomeLocation);
+
+    // for some reason these paths have changed a lot so we have to check them all :(
+    const QString basePaths[] = {
+#if defined(Q_OS_WIN32)
+      lit("/AppData/Local/LunarG/vkconfig/override/"),
+      lit("/AppData/Local/LunarG/vulkan/"),
+#else
+      lit("/.local/share/vulkan/implicit_layer.d/"),
+      lit("/.local/share/vulkan/loader_settings.d/"),
+#endif
+    };
+
+    const QString filenames[] = {
+        lit("VkLayerOverride.json"),
+        lit("VkLayer_Override.json"),
+        lit("VkLayer_override.json"),
+        lit("vk_loader_settings.json"),
+    };
+
+    for(const QString &path : basePaths)
+    {
+      for(const QString &fn : filenames)
+      {
+        QFileInfo vkconfigcheck(homePath + path + fn);
+
+        if(vkconfigcheck.exists() && vkconfigcheck.isFile())
+        {
+          RDDialog::warning(
+              NULL, tr("vkconfig detected - possible incompatibility"),
+              tr("Configuration from 'vkconfig' tool detected.\n\n"
+                 "This program has caused problems in the past and it is \n"
+                 "strongly recommended that you disable it while using RenderDoc.\n\n"
+                 "If this program is not active check the path below for any leftover files:\n\n%1")
+                  .arg(vkconfigcheck.absoluteFilePath()));
+
+          qInfo() << "vkconfig detected and warned";
+          vkconfigCheckTimer->stop();
+          return;
+        }
+      }
+    }
+  });
+
+  vkconfigCheckTimer->setSingleShot(false);
+  vkconfigCheckTimer->setInterval(2500);
+  vkconfigCheckTimer->start();
+
   m_RemoteProbeSemaphore.release();
   m_RemoteProbe = new LambdaThread([this]() {
     // fetch all device protocols to start them processing
@@ -239,6 +291,9 @@ MainWindow::MainWindow(ICaptureContext &ctx) : QMainWindow(NULL), ui(new Ui::Mai
     {
       // do a remoteProbe immediately to populate the device list on startup.
       remoteProbe();
+
+      // allow any early-init replay host switches now that we've populated the device list
+      m_RemoteInitialProbeReady.release();
 
       // do several small sleeps so we can respond quicker when we need to shut down
       for(int i = 0; i < 50; i++)
@@ -392,6 +447,8 @@ MainWindow::MainWindow(ICaptureContext &ctx) : QMainWindow(NULL), ui(new Ui::Mai
   ui->action_Resolve_Symbols->setText(tr("Resolve Symbols"));
 
   ui->action_Recompress_Capture->setEnabled(false);
+  ui->action_EmbedExternalFiles->setEnabled(false);
+  ui->action_RemoveExternalFiles->setEnabled(false);
 
 #if defined(Q_OS_WIN32)
 #define SELF_HOST_NAME "rdocself.dll"
@@ -622,6 +679,8 @@ void MainWindow::captureModified()
   // enabled if this capture was a temporary one
   if(m_Ctx.IsCaptureLoaded())
     ui->action_Save_Capture_Inplace->setEnabled(true);
+
+  updateToolsMenuOptions();
 }
 
 void MainWindow::LoadFromFilename(const QString &filename, bool temporary)
@@ -693,7 +752,7 @@ void MainWindow::OnCaptureTrigger(const QString &exe, const QString &workingDir,
       {
         RDDialog::critical(
             this, tr("Error launching capture"),
-            tr("Error launching %1 for capture.\n\n%2.").arg(exe).arg(ret.result.Message()));
+            tr("Error launching %1 for capture.\n\n%2").arg(exe).arg(ret.result.Message()));
         return;
       }
 
@@ -1679,6 +1738,11 @@ void MainWindow::LoadInitialLayout()
   }
 }
 
+bool MainWindow::ErrorReportsAllowed()
+{
+  return ui->action_Send_Error_Report->isEnabled();
+}
+
 void MainWindow::RemoveRecentCapture(const QString &filename)
 {
   RemoveRecentFile(m_Ctx.Config().RecentCaptureFiles, filename);
@@ -1933,6 +1997,11 @@ void MainWindow::setRemoteHost(int hostIdx)
   if(!PromptCloseCapture())
     return;
 
+  // we only want to block once before the initial remoteProbe has happened. After that once we can
+  // acquire once, we re-release so the next one can happen
+  m_RemoteInitialProbeReady.acquire();
+  m_RemoteInitialProbeReady.release();
+
   rdcarray<RemoteHost> hosts = m_Ctx.Config().GetRemoteHosts();
 
   RemoteHost host;
@@ -2171,12 +2240,25 @@ void MainWindow::OnCaptureLoaded()
 
   statusProgress->setVisible(false);
 
-  ui->action_Recompress_Capture->setEnabled(true);
+  // don't allow capture recompress on opened images
+  QString driver = m_Ctx.Replay().GetCaptureAccess()->DriverName();
+  bool is_image = driver == lit("Image");
+  ui->action_Recompress_Capture->setEnabled(!is_image);
+
+  updateToolsMenuOptions();
 
   ui->action_Start_Replay_Loop->setEnabled(true);
-  ui->action_Open_RGP_Profile->setEnabled(
-      m_Ctx.Replay().GetCaptureAccess()->FindSectionByType(SectionType::AMDRGPProfile) >= 0);
+
+  ui->action_Open_RGP_Profile->setEnabled(false);
   ui->action_Create_RGP_Profile->setEnabled(m_Ctx.APIProps().rgpCapture && m_Ctx.IsCaptureLocal());
+  m_Ctx.Replay().AsyncInvoke([this](IReplayController *) {
+    bool hasAMDGRPPorfile =
+        (m_Ctx.Replay().GetCaptureAccess()->FindSectionByType(SectionType::AMDRGPProfile) >= 0);
+
+    GUIInvoke::call(this, [this, hasAMDGRPPorfile]() {
+      ui->action_Open_RGP_Profile->setEnabled(hasAMDGRPPorfile);
+    });
+  });
 
   setCaptureHasErrors(!m_Ctx.DebugMessages().empty());
 
@@ -2198,6 +2280,15 @@ void MainWindow::OnCaptureLoaded()
 
   if(m_Ctx.HasEventBrowser())
     ToolWindowManager::raiseToolWindow(m_Ctx.GetEventBrowser()->Widget());
+
+  // the first time we load a capture with annotations, show/bring the annotation viewer to the
+  // front. After that, if the user hides it we won't show it again.
+  if(!m_Ctx.Config().Annotations_HasAutoShown && m_Ctx.FrameInfo().containsAnnotations)
+  {
+    m_Ctx.ShowAnnotationViewer();
+    m_Ctx.Config().Annotations_HasAutoShown = true;
+    ToolWindowManager::raiseToolWindow(m_Ctx.GetAnnotationViewer()->Widget());
+  }
 }
 
 void MainWindow::OnCaptureClosed()
@@ -2221,6 +2312,8 @@ void MainWindow::OnCaptureClosed()
   ui->action_Resolve_Symbols->setText(tr("Resolve Symbols"));
 
   ui->action_Recompress_Capture->setEnabled(false);
+  ui->action_EmbedExternalFiles->setEnabled(false);
+  ui->action_RemoveExternalFiles->setEnabled(false);
 
   SetTitle();
 
@@ -2425,6 +2518,38 @@ void MainWindow::on_action_API_Inspector_triggered()
   }
 }
 
+void MainWindow::on_action_Annotation_Viewer_triggered()
+{
+  QWidget *annotViewer = m_Ctx.GetAnnotationViewer()->Widget();
+
+  if(ui->toolWindowManager->toolWindows().contains(annotViewer))
+  {
+    ToolWindowManager::raiseToolWindow(annotViewer);
+  }
+  else
+  {
+    if(m_Ctx.HasAPIInspector() &&
+       ui->toolWindowManager->toolWindows().contains(m_Ctx.GetAPIInspector()->Widget()))
+    {
+      ToolWindowManager::AreaReference ref(
+          ToolWindowManager::AddTo, ui->toolWindowManager->areaOf(m_Ctx.GetAPIInspector()->Widget()));
+      ui->toolWindowManager->addToolWindow(annotViewer, ref);
+    }
+    else if(m_Ctx.HasEventBrowser() &&
+            ui->toolWindowManager->toolWindows().contains(m_Ctx.GetEventBrowser()->Widget()))
+    {
+      ToolWindowManager::AreaReference ref(
+          ToolWindowManager::BottomOf,
+          ui->toolWindowManager->areaOf(m_Ctx.GetEventBrowser()->Widget()));
+      ui->toolWindowManager->addToolWindow(annotViewer, ref);
+    }
+    else
+    {
+      ui->toolWindowManager->addToolWindow(annotViewer, leftToolArea());
+    }
+  }
+}
+
 void MainWindow::on_action_Event_Browser_triggered()
 {
   QWidget *eventBrowser = m_Ctx.GetEventBrowser()->Widget();
@@ -2573,12 +2698,22 @@ void MainWindow::on_action_Recompress_Capture_triggered()
   m_Ctx.RecompressCapture();
 }
 
+void MainWindow::on_action_EmbedExternalFiles_triggered()
+{
+  m_Ctx.EmbedDependentFiles();
+}
+
+void MainWindow::on_action_RemoveExternalFiles_triggered()
+{
+  m_Ctx.RemoveDependentFiles();
+}
+
 void MainWindow::on_action_Start_Replay_Loop_triggered()
 {
   if(!m_Ctx.IsCaptureLoaded())
     return;
 
-  QDialog popup;
+  RDDialog popup;
   popup.setWindowFlags(popup.windowFlags() & ~Qt::WindowContextHelpButtonHint);
   popup.setWindowIcon(windowIcon());
 
@@ -2640,6 +2775,13 @@ void MainWindow::on_action_Start_Replay_Loop_triggered()
   WindowingData winData = m_Ctx.CreateWindowingData(&popup);
 
   m_Ctx.Replay().AsyncInvoke([winData, id](IReplayController *r) { r->ReplayLoop(winData, id); });
+
+  QObject::connect(&popup, &RDDialog::aboutToClose,
+                   [this](QCloseEvent *) { m_Ctx.Replay().CancelReplayLoop(); });
+  QObject::connect(&popup, &RDDialog::keyPress, [this](QKeyEvent *e) {
+    if(e->matches(QKeySequence::Cancel))
+      m_Ctx.Replay().CancelReplayLoop();
+  });
 
   RDDialog::show(&popup);
 
@@ -2831,6 +2973,9 @@ void MainWindow::on_action_Send_Error_Report_triggered()
 
 void MainWindow::sendErrorReport(bool forceCaptureInclusion)
 {
+  if(!ErrorReportsAllowed())
+    return;
+
   rdcstr report;
   RENDERDOC_CreateBugReport(RENDERDOC_GetLogFile(), "", report);
 
@@ -2918,6 +3063,22 @@ void MainWindow::saveLayout_triggered()
 void MainWindow::loadLayout_triggered()
 {
   LoadSaveLayout(qobject_cast<QAction *>(QObject::sender()), false);
+}
+
+void MainWindow::updateToolsMenuOptions()
+{
+  if(m_Ctx.Replay().GetCaptureAccess())
+  {
+    m_Ctx.Replay().AsyncInvoke([this](IReplayController *) {
+      bool hasEmbeddedDependencies = m_Ctx.Replay().GetCaptureAccess()->HasEmbeddedDependencies();
+      bool hasPendingDependencies = m_Ctx.Replay().GetCaptureAccess()->HasPendingDependencies();
+
+      GUIInvoke::call(this, [this, hasEmbeddedDependencies, hasPendingDependencies]() {
+        ui->action_EmbedExternalFiles->setEnabled(!hasEmbeddedDependencies && hasPendingDependencies);
+        ui->action_RemoveExternalFiles->setEnabled(hasEmbeddedDependencies);
+      });
+    });
+  }
 }
 
 void MainWindow::closeEvent(QCloseEvent *event)

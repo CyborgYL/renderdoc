@@ -19,6 +19,8 @@ parser.add_argument('--in-process',
                     help="Run test code in the same process as test runner", action="store_true")
 parser.add_argument('--slow-tests',
                     help="Run potentially slow tests", action="store_true")
+parser.add_argument('--test-timeout',
+                    help="Timeout for output from tests", default=90, type=int)
 parser.add_argument('--data', default=os.path.join(script_dir, "data"),
                     help="The folder that reference data is in. Will not be modified.", type=str)
 parser.add_argument('--demos-binary', default="",
@@ -34,6 +36,8 @@ parser.add_argument('--temp', default=os.path.join(script_dir, "tmp"),
                     help="The folder to put temporary run data in. Will be completely cleared.", type=str)
 parser.add_argument('--debugger',
                     help="Enable debugger mode, exceptions are not caught by the framework.", action="store_true")
+parser.add_argument('--adb-device', required=False,
+                    help="Use the specified ADB device to run the tests.", type=str)
 # Internal command, when we fork out to run a test in a separate process
 parser.add_argument('--internal_run_test', help=argparse.SUPPRESS, type=str, required=False)
 # Internal command, when we re-run as admin to register vulkan layer
@@ -126,6 +130,10 @@ rdtest.set_temp_dir(temp_path)
 rdtest.set_demos_binary(demos_binary)
 rdtest.set_demos_timeout(demos_timeout)
 
+if args.adb_device:
+    rdtest.create_adb_device(args.adb_device)
+else:
+    rdtest.set_remote_server(None)
 # debugger option implies in-process test running
 if args.debugger:
     args.in_process = True
@@ -137,4 +145,4 @@ elif args.internal_remote_server:
 elif args.internal_run_test is not None:
     rdtest.internal_run_test(args.internal_run_test)
 else:
-    rdtest.run_tests(args.test_include, args.test_exclude, args.in_process, args.slow_tests, args.debugger)
+    rdtest.run_tests(args.test_include, args.test_exclude, args.in_process, args.slow_tests, args.debugger, args.test_timeout)

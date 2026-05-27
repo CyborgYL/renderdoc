@@ -1,7 +1,7 @@
 /******************************************************************************
  * The MIT License (MIT)
  *
- * Copyright (c) 2019-2024 Baldur Karlsson
+ * Copyright (c) 2018-2026 Baldur Karlsson
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -41,10 +41,11 @@ struct AllocatedBuffer
   VmaAllocator allocator = NULL;
   VkBuffer buffer = VK_NULL_HANDLE;
   VmaAllocation alloc = {};
+  VkDeviceAddress address = 0;
 
   AllocatedBuffer() {}
   AllocatedBuffer(VulkanGraphicsTest *test, const VkBufferCreateInfo &bufInfo,
-                  const VmaAllocationCreateInfo &allocInfo);
+                  const VmaAllocationCreateInfo &allocInfo, uint32_t alignment = 1);
 
   void free();
 
@@ -182,8 +183,9 @@ private:
   std::vector<VkImage> imgs;
   std::vector<VkImageView> imgviews;
   uint32_t semIdx = 0;
-  VkSemaphore renderStartSemaphore[4] = {};
-  VkSemaphore renderEndSemaphore[4] = {};
+  std::vector<VkSemaphore> renderStartSemaphore;
+  std::vector<VkSemaphore> renderEndSemaphore;
+  std::vector<VkFence> imageFences;
   std::vector<VkFramebuffer> fbs;
 
   GraphicsWindow *m_Win;
@@ -333,6 +335,7 @@ struct VulkanGraphicsTest : public GraphicsTest
 
   // VMA
   bool vmaDedicated = false;
+  bool vmaBDA = false;
   VmaAllocator allocator = VK_NULL_HANDLE;
 
 private:

@@ -19,6 +19,8 @@ class Repeat_Load(rdtest.TestCase):
                 return
 
             rdtest.log.print("Loaded capture.")
+            if not self.validate_eventids(controller):
+                raise rdtest.TestFailureException("ERROR: capture doesn't have valid event IDs.")
 
             # Do nothing, just ensure it's loaded
             memory_usage: int = rd.GetCurrentProcessMemoryUsage()
@@ -50,10 +52,10 @@ class Repeat_Load(rdtest.TestCase):
         dir_path = self.get_ref_path('', extra=True)
 
         for file in os.scandir(dir_path):
-            rdtest.log.print('Repeat loading {}'.format(file.name))
+            section_name = f"Repeat loading {file.name}"
 
+            rdtest.log.begin_section(section_name)
             self.repeat_load(file.path)
-
-            rdtest.log.success("Successfully repeat loaded {}".format(file.name))
+            rdtest.log.end_section(section_name)
 
         rdtest.log.success("Repeat loaded all files")

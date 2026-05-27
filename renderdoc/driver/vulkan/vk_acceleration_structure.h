@@ -1,7 +1,7 @@
 /******************************************************************************
  * The MIT License (MIT)
  *
- * Copyright (c) 2024 Baldur Karlsson
+ * Copyright (c) 2024-2026 Baldur Karlsson
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -35,28 +35,25 @@ struct VkAccelerationStructureInfo
   {
     struct Triangles
     {
-      VkFormat vertexFormat;
-      VkDeviceSize vertexStride;
-      uint32_t maxVertex;
-      VkIndexType indexType;
-      bool hasTransformData;
+      VkFormat vertexFormat = VK_FORMAT_UNDEFINED;
+      VkDeviceSize vertexStride = 0;
+      uint32_t maxVertex = 0;
+      VkIndexType indexType = VK_INDEX_TYPE_NONE_KHR;
     };
 
     struct Aabbs
     {
-      VkDeviceSize stride;
+      VkDeviceSize stride = 0;
     };
 
     VkGeometryTypeKHR geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
-    VkGeometryFlagsKHR flags;
-
-    VkDeviceMemory readbackMem;
-    VkDeviceSize memSize;
+    VkGeometryFlagsKHR flags = 0;
 
     Triangles tris;
     Aabbs aabbs;
 
-    VkAccelerationStructureBuildRangeInfoKHR buildRangeInfo;
+    VkAccelerationStructureBuildRangeInfoKHR buildRangeInfo = {};
+    VkDeviceSize memOffset = 0;
   };
 
   ~VkAccelerationStructureInfo();
@@ -64,7 +61,12 @@ struct VkAccelerationStructureInfo
   void AddRef() { Atomic::Inc32(&refCount); }
   void Release();
 
-  VkDevice device = VK_NULL_HANDLE;
+  uint64_t GetSerialisedSize() const;
+
+  void convertGeometryData(rdcarray<VkAccelerationStructureGeometryKHR> &geometry) const;
+  rdcarray<VkAccelerationStructureBuildRangeInfoKHR> getBuildRanges() const;
+
+  VkDeviceAddress address;
 
   VkAccelerationStructureTypeKHR type =
       VkAccelerationStructureTypeKHR::VK_ACCELERATION_STRUCTURE_TYPE_GENERIC_KHR;
@@ -72,36 +74,29 @@ struct VkAccelerationStructureInfo
 
   rdcarray<GeometryData> geometryData;
 
+  GPUBuffer readbackMem;
+  VkDeviceSize memSize = 0;
+
+  MemoryAllocation uploadAlloc;
+  VkBuffer uploadBuf = VK_NULL_HANDLE;
+  VkAccelerationStructureKHR replayAS = VK_NULL_HANDLE;
+
   bool accelerationStructureBuilt = false;
 
 private:
   int32_t refCount = 1;
 };
 
+DECLARE_REFLECTION_STRUCT(VkAccelerationStructureInfo::GeometryData::Triangles);
+DECLARE_REFLECTION_STRUCT(VkAccelerationStructureInfo::GeometryData::Aabbs);
+DECLARE_REFLECTION_STRUCT(VkAccelerationStructureInfo::GeometryData);
+DECLARE_REFLECTION_STRUCT(VkAccelerationStructureInfo);
+
 class VulkanAccelerationStructureManager
 {
 public:
-  struct ASMemory
-  {
-    MemoryAllocation alloc;
-    bool isTLAS;
-  };
-
-  struct Allocation
-  {
-    VkDeviceMemory mem = VK_NULL_HANDLE;
-    VkDeviceSize size = 0;
-    VkBuffer buf = VK_NULL_HANDLE;
-  };
-
-  struct RecordAndOffset
-  {
-    VkResourceRecord *record = NULL;
-    VkDeviceAddress address = 0x0;
-    VkDeviceSize offset = 0;
-  };
-
   explicit VulkanAccelerationStructureManager(WrappedVulkan *driver);
+  void Cleanup();
 
   // Allocates readback mem and injects commands into the command buffer so that the input buffers
   // are copied.
@@ -115,28 +110,46 @@ public:
   void CopyAccelerationStructure(VkCommandBuffer commandBuffer,
                                  const VkCopyAccelerationStructureInfoKHR &pInfo);
 
-  // Called when the initial state is prepared.  Any TLAS and BLAS data is copied into temporary
-  // buffers and the handles for that memory and the buffers is stored in the init state
-  bool Prepare(VkAccelerationStructureKHR unwrappedAs, const rdcarray<uint32_t> &queueFamilyIndices,
-               ASMemory &result);
+  uint64_t GetSize_InitialState(ResourceId id, const VkInitialContents &initial);
 
   template <typename SerialiserType>
   bool Serialise(SerialiserType &ser, ResourceId id, const VkInitialContents *initial,
                  CaptureState state);
 
-  // Called when the initial state is applied.  The AS data is deserialised from the upload buffer
-  // into the acceleration structure
-  void Apply(ResourceId id, const VkInitialContents &initial);
+  // Called when the initial state is applied.
+  void Apply(ResourceId id, VkInitialContents &initial);
 
 private:
-  Allocation CreateReadBackMemory(VkDevice device, VkDeviceSize size, VkDeviceSize alignment = 0);
+  struct Allocation
+  {
+    MemoryAllocation memAlloc;
+    VkBuffer buf = VK_NULL_HANDLE;
+  };
+
+  struct RecordAndOffset
+  {
+    VkResourceRecord *record = NULL;
+    VkDeviceAddress address = 0x0;
+    VkDeviceSize offset = 0;
+  };
+
+  GPUBuffer CreateTempReadBackBuffer(VkDevice device, VkDeviceSize size);
+  Allocation CreateTempReplayBuffer(MemoryType memType, VkDeviceSize size, VkDeviceSize alignment,
+                                    VkBufferUsageFlags extraUsageFlags = 0);
+
+  bool FixUpReplayBDAs(VkAccelerationStructureInfo *asInfo, VkBuffer buf,
+                       rdcarray<VkAccelerationStructureGeometryKHR> &geoms);
+
+  void UpdateScratch(VkDeviceSize requiredSize);
 
   RecordAndOffset GetDeviceAddressData(VkDeviceAddress address) const;
 
   template <typename T>
   void DeletePreviousInfo(VkCommandBuffer commandBuffer, T *info);
 
-  VkDeviceSize SerialisedASSize(VkAccelerationStructureKHR unwrappedAs);
-
   WrappedVulkan *m_pDriver;
+
+  Allocation scratch;
+  VkDeviceOrHostAddressKHR scratchAddressUnion;
+  rdcarray<VkBuffer> scratchBuffers;
 };

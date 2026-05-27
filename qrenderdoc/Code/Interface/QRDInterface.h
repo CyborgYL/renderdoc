@@ -1,7 +1,7 @@
 /******************************************************************************
  * The MIT License (MIT)
  *
- * Copyright (c) 2019-2024 Baldur Karlsson
+ * Copyright (c) 2017-2026 Baldur Karlsson
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -107,17 +107,30 @@ struct CaptureSettings
 :type: renderdoc.CaptureOptions
 )");
   CaptureOptions options;
-  DOCUMENT(
-      "``True`` if the described capture is an inject-into-process instead of a launched "
-      "executable.");
+  DOCUMENT(R"(``True`` if the described capture is an inject-into-process instead of a launched executable.
+
+:type: bool
+)");
   bool inject;
-  DOCUMENT("``True`` if this capture settings object should be immediately executed upon load.");
+  DOCUMENT(R"(``True`` if this capture settings object should be immediately executed upon load.
+
+:type: bool
+)");
   bool autoStart;
-  DOCUMENT("The path to the executable to run.");
+  DOCUMENT(R"(The path to the executable to run.
+
+:type: str
+)");
   rdcstr executable;
-  DOCUMENT("The path to the working directory to run in, or blank for the executable's directory.");
+  DOCUMENT(R"(The path to the working directory to run in, or blank for the executable's directory.
+
+:type: str
+)");
   rdcstr workingDir;
-  DOCUMENT("The command line to pass when running :data:`executable`.");
+  DOCUMENT(R"(The command line to pass when running :data:`executable`.
+
+:type: str
+)");
   rdcstr commandLine;
   DOCUMENT("The process name which do not want to hook in.")
   rdcstr blacklist;
@@ -126,15 +139,23 @@ struct CaptureSettings
 :type: List[renderdoc.EnvironmentModification]
 )");
   rdcarray<EnvironmentModification> environment;
-  DOCUMENT("The number of queued frames to capture, or 0 if no frames are queued to be captured.");
+  DOCUMENT(R"(The number of queued frames to capture, or 0 if no frames are queued to be captured.
+
+:type: int
+)");
   uint32_t numQueuedFrames;
-  DOCUMENT("The first queued frame to capture. Ignored if :data:`numQueuedFrames` is 0.");
+  DOCUMENT(R"(The first queued frame to capture. Ignored if :data:`numQueuedFrames` is 0.
+
+:type: int
+)");
   uint32_t queuedFrameCap;
 };
 
 DECLARE_REFLECTION_STRUCT(CaptureSettings);
 
 DOCUMENT(R"(The main parent window of the application.
+
+This window is retrieved by calling :meth:`CaptureContext.GetMainWindow`.
 
 .. function:: ShortcutCallback(QWidget focusWidget)
 
@@ -172,6 +193,7 @@ will be invoked, if it exists.
   for a global shortcut. Note that if an existing global shortcut exists the new one will not be
   registered.
 :param ShortcutCallback callback: The function to callback when the shortcut is hit.
+  Callback function signature must match :func:`ShortcutCallback`.
 )");
   virtual void RegisterShortcut(const rdcstr &shortcut, QWidget *widget,
                                 ShortcutCallback callback) = 0;
@@ -204,12 +226,14 @@ DECLARE_REFLECTION_STRUCT(IMainWindow);
 
 DOCUMENT(R"(The event browser window.
 
+This window is retrieved by calling :meth:`CaptureContext.GetEventBrowser`.
+
 .. function:: EventFilterCallback(context, filter, params, eventId, chunk, action, name)
 
   Not a member function - the signature for any ``EventFilterCallback`` callbacks.
 
   Called for each event in a capture when performing filtering in the Event Browser. The associated
-  ``FilterParseCallback`` will be called first to parse the parameters, and is available for caching
+  :func:`FilterParseCallback` will be called first to parse the parameters, and is available for caching
   or syntax checking. The same filter name and params string will be passed to this function.
 
   :param CaptureContext context: The current capture context.
@@ -345,10 +369,13 @@ expression.
   what each filter means.
 :param EventFilterCallback filter: The callback to call for each candidate event to perform
   filtering.
+  Callback function signature must match :func:`EventFilterCallback`.
 :param FilterParseCallback parser: The callback to call when the parsing the parameters and checking
   for any errors. This can be ``None`` if no pre-parsing is required.
+  Callback function signature must match :func:`FilterParseCallback`.
 :param AutoCompleteCallback completer: The callback to call when trying to provide autocomplete
   suggestions. This can be ``None`` if no completion is desired/applicable.
+  Callback function signature must match :func:`AutoCompleteCallback`.
 :return: Whether or not the registration was successful.
 :rtype: bool
 )");
@@ -415,6 +442,32 @@ the most significant parameters are shown.
 )");
   virtual void SetEmptyRegionsVisible(bool show) = 0;
 
+  DOCUMENT(R"(Sets the current annotation key path. This will not display the annotation column if
+it is not already visible.
+
+:param str annotationPath: The new annotation path.
+)");
+  virtual void SetHighlightedAnnotation(const rdcstr &annotationPath) = 0;
+
+  DOCUMENT(R"(Returns the current annotation key path as being highlighted in the annotation column.
+
+:return: The current annotation path.
+:rtype: str
+)");
+  virtual rdcstr GetHighlightedAnnotation() = 0;
+
+  DOCUMENT(R"(Sets whether or not the duration column is visible.
+
+:param bool show: If the duration column should be shown.
+)");
+  virtual void SetDurationColumnVisible(bool show) = 0;
+
+  DOCUMENT(R"(Sets whether or not the annotation column is visible.
+
+:param bool show: If the duration column should be shown.
+)");
+  virtual void SetAnnotationColumnVisible(bool show) = 0;
+
 protected:
   IEventBrowser() = default;
   ~IEventBrowser() = default;
@@ -422,7 +475,10 @@ protected:
 
 DECLARE_REFLECTION_STRUCT(IEventBrowser);
 
-DOCUMENT("The API inspector window.");
+DOCUMENT(R"(The API inspector window.
+
+This window is retrieved by calling :meth:`CaptureContext.GetAPIInspector`.
+)");
 struct IAPIInspector
 {
   DOCUMENT(R"(Retrieves the PySide2 QWidget for this :class:`APIInspector` if PySide2 is available, or otherwise
@@ -449,6 +505,36 @@ protected:
 };
 
 DECLARE_REFLECTION_STRUCT(IAPIInspector);
+
+DOCUMENT(R"(The annotation viewer window.
+
+This window is retrieved by calling :meth:`CaptureContext.GetAnnotationViewer`.
+)");
+struct IAnnotationViewer
+{
+  DOCUMENT(R"(Retrieves the PySide2 QWidget for this :class:`AnnotationViewer` if PySide2 is available, or otherwise
+returns a unique opaque pointer that can be passed back to any RenderDoc functions expecting a
+QWidget.
+
+:return: Return the widget handle, either a PySide2 handle or an opaque handle.
+:rtype: QWidget
+)");
+  virtual QWidget *Widget() = 0;
+
+  DOCUMENT(R"(Expand the annotation view to reveal a given path and select it.
+
+If the path does not exist, this will do nothing.
+
+:param str keyPath: The key path to the annotation.
+)");
+  virtual void RevealAnnotation(const rdcstr &keyPath) = 0;
+
+protected:
+  IAnnotationViewer() = default;
+  ~IAnnotationViewer() = default;
+};
+
+DECLARE_REFLECTION_STRUCT(IAnnotationViewer);
 
 DOCUMENT(R"(Specifies a pipeline stage for the :class:`PipelineStateViewer`.
 
@@ -545,7 +631,10 @@ enum class PipelineStage : int
   SampleMask,
 };
 
-DOCUMENT("The pipeline state viewer window.");
+DOCUMENT(R"(The pipeline state viewer window.
+
+This window is retrieved by calling :meth:`CaptureContext.GetPipelineViewer`.
+)");
 struct IPipelineStateViewer
 {
   DOCUMENT(R"(Retrieves the PySide2 QWidget for this :class:`PipelineStateViewer` if PySide2 is available, or otherwise
@@ -613,7 +702,10 @@ enum class FollowType : int
   OutputDepthResolve
 };
 
-DOCUMENT("The texture viewer window.");
+DOCUMENT(R"(The texture viewer window.
+
+This window is retrieved by calling :meth:`CaptureContext.GetTextureViewer`.
+)");
 struct ITextureViewer
 {
   DOCUMENT(R"(Retrieves the PySide2 QWidget for this :class:`TextureViewer` if PySide2 is available, or otherwise
@@ -759,7 +851,14 @@ protected:
 
 DECLARE_REFLECTION_STRUCT(ITextureViewer);
 
-DOCUMENT("The buffer viewer window, either a raw buffer or the geometry pipeline.");
+DOCUMENT(R"(The buffer viewer window, either a raw buffer or the geometry pipeline.
+
+This mesh viewer is retrieved by calling :meth:`CaptureContext.GetMeshPreview`.
+
+A raw buffer viewer can be opened by calling :meth:`CaptureContext.ViewBuffer`,
+:meth:`CaptureContext.ViewTextureAsBuffer`, or :meth:`CaptureContext.ViewConstantBuffer`.
+
+)");
 struct IBufferViewer
 {
   DOCUMENT(R"(Retrieves the PySide2 QWidget for this :class:`BufferViewer` if PySide2 is available, or otherwise
@@ -819,7 +918,10 @@ protected:
 
 DECLARE_REFLECTION_STRUCT(IBufferViewer);
 
-DOCUMENT("The Resource inspector window.");
+DOCUMENT(R"(The Resource inspector window.
+
+This window is retrieved by calling :meth:`CaptureContext.GetResourceInspector`.
+)");
 struct IResourceInspector
 {
   DOCUMENT(R"(Retrieves the PySide2 QWidget for this :class:`ResourceInspector` if PySide2 is available, or otherwise
@@ -857,7 +959,10 @@ protected:
 
 DECLARE_REFLECTION_STRUCT(IResourceInspector);
 
-DOCUMENT("The executable capture window.");
+DOCUMENT(R"(The executable capture window.
+
+This window is retrieved by calling :meth:`CaptureContext.GetCaptureDialog`.
+)");
 struct ICaptureDialog
 {
   DOCUMENT(R"(Retrieves the PySide2 QWidget for this :class:`CaptureDialog` if PySide2 is available, or otherwise
@@ -946,7 +1051,10 @@ protected:
 
 DECLARE_REFLECTION_STRUCT(ICaptureDialog);
 
-DOCUMENT("The debug warnings and errors window.");
+DOCUMENT(R"(The debug warnings and errors window.
+
+This window is retrieved by calling :meth:`CaptureContext.GetDebugMessageView`.
+)");
 struct IDebugMessageView
 {
   DOCUMENT(R"(Retrieves the PySide2 QWidget for this :class:`DebugMessageView` if PySide2 is available, or otherwise
@@ -965,7 +1073,10 @@ protected:
 
 DECLARE_REFLECTION_STRUCT(IDebugMessageView);
 
-DOCUMENT("The diagnostic log viewing window.");
+DOCUMENT(R"(The diagnostic log viewing window.
+
+This window is retrieved by calling :meth:`CaptureContext.GetDiagnosticLogView`.
+)");
 struct IDiagnosticLogView
 {
   DOCUMENT(R"(Retrieves the PySide2 QWidget for this :class:`DiagnosticLogView` if PySide2 is available, or otherwise
@@ -984,7 +1095,10 @@ protected:
 
 DECLARE_REFLECTION_STRUCT(IDiagnosticLogView);
 
-DOCUMENT("The capture comments window.");
+DOCUMENT(R"(The capture comments window.
+
+This window is retrieved by calling :meth:`CaptureContext.GetCommentView`.
+)");
 struct ICommentView
 {
   DOCUMENT(R"(Retrieves the PySide2 QWidget for this :class:`CommentView` if PySide2 is available, or otherwise
@@ -1016,7 +1130,10 @@ protected:
 
 DECLARE_REFLECTION_STRUCT(ICommentView);
 
-DOCUMENT("The statistics window.");
+DOCUMENT(R"(The statistics window.
+
+This window is retrieved by calling :meth:`CaptureContext.GetStatisticsViewer`.
+)");
 struct IStatisticsViewer
 {
   DOCUMENT(R"(Retrieves the PySide2 QWidget for this :class:`StatisticsViewer` if PySide2 is available, or otherwise
@@ -1033,7 +1150,10 @@ protected:
   ~IStatisticsViewer() = default;
 };
 
-DOCUMENT("The timeline bar.");
+DOCUMENT(R"(The timeline bar.
+
+This window is retrieved by calling :meth:`CaptureContext.GetTimelineBar`.
+)");
 struct ITimelineBar
 {
   DOCUMENT(R"(Retrieves the PySide2 QWidget for this :class:`TimelineBar` if PySide2 is available, or otherwise
@@ -1065,7 +1185,10 @@ protected:
 
 DECLARE_REFLECTION_STRUCT(IStatisticsViewer);
 
-DOCUMENT("The performance counter view window.");
+DOCUMENT(R"(The performance counter view window.
+
+This window is retrieved by calling :meth:`CaptureContext.GetPerformanceCounterViewer`.
+)");
 struct IPerformanceCounterViewer
 {
   DOCUMENT(R"(Retrieves the PySide2 QWidget for this :class:`PerformanceCounterViewer` if PySide2 is available, or otherwise
@@ -1087,7 +1210,10 @@ protected:
 
 DECLARE_REFLECTION_STRUCT(IPerformanceCounterViewer);
 
-DOCUMENT("The interactive python shell.");
+DOCUMENT(R"(The interactive python shell.
+
+This window is retrieved by calling :meth:`CaptureContext.GetPythonShell`.
+)");
 struct IPythonShell
 {
   DOCUMENT(R"(Retrieves the PySide2 QWidget for this :class:`PythonShell` if PySide2 is available, or otherwise
@@ -1132,6 +1258,9 @@ protected:
 DECLARE_REFLECTION_STRUCT(IPythonShell);
 
 DOCUMENT(R"(A shader window used for viewing, editing, or debugging.
+
+This window is retrieved by calling :meth:`CaptureContext.ViewShader`,
+:meth:`CaptureContext.EditShader`, or :meth:`CaptureContext.DebugShader`.
 
 .. function:: SaveCallback(context, viewer, encoding, flags, entry, compiled)
 
@@ -1232,7 +1361,10 @@ protected:
 
 DECLARE_REFLECTION_STRUCT(IShaderViewer);
 
-DOCUMENT("A shader message list window.");
+DOCUMENT(R"(A shader message list window.
+
+This window is retrieved by calling :meth:`CaptureContext.ViewShaderMessages`.
+)");
 struct IShaderMessageViewer
 {
   DOCUMENT(R"(Retrieves the PySide2 QWidget for this :class:`ShaderMessageViewer` if PySide2 is available, or otherwise
@@ -1273,7 +1405,10 @@ protected:
 
 DECLARE_REFLECTION_STRUCT(IShaderMessageViewer);
 
-DOCUMENT("A descriptor viewer window.");
+DOCUMENT(R"(A descriptor viewer window.
+
+This window is retrieved by calling :meth:`CaptureContext.ViewDescriptorStore` or :meth:`CaptureContext.ViewDescriptors`.
+)");
 struct IDescriptorViewer
 {
   DOCUMENT(R"(Retrieves the PySide2 QWidget for this :class:`DescriptorViewer` if PySide2 is available, or otherwise
@@ -1292,7 +1427,10 @@ protected:
 
 DECLARE_REFLECTION_STRUCT(IDescriptorViewer);
 
-DOCUMENT("A pixel history window.");
+DOCUMENT(R"(A pixel history window.
+
+This window is retrieved by calling :meth:`CaptureContext.ViewPixelHistory`.
+)");
 struct IPixelHistoryView
 {
   DOCUMENT(R"(Retrieves the PySide2 QWidget for this :class:`PixelHistoryView` if PySide2 is available, or otherwise
@@ -1309,6 +1447,11 @@ QWidget.
 :param List[renderdoc.PixelModification] history: A list of pixel events to display.
 )");
   virtual void SetHistory(const rdcarray<PixelModification> &history) = 0;
+
+  DOCUMENT(R"(Indicates that the pixel history was launched as a result of failing to debug a shader,
+so a message will be displayed to explain.
+)");
+  virtual void SetFailedDebug() = 0;
 
 protected:
   IPixelHistoryView() = default;
@@ -1360,6 +1503,8 @@ DECLARE_REFLECTION_STRUCT(ICaptureViewer *);
 DOCUMENT(R"(A manager for accessing the underlying replay information that isn't already abstracted
 in UI side structures. This manager controls and serialises access to the underlying
 :class:`~renderdoc.ReplayController`, as well as handling remote server connections.
+
+This manager is retrieved by calling :meth:`CaptureContext.Replay`.
 
 .. function:: InvokeCallback(controller)
 
@@ -1471,6 +1616,7 @@ blocking fashion on the current thread.
 :param bool synchronous: If a capture is open, then ``True`` will use :meth:`BlockInvoke` to call
   the callback. Otherwise if ``False`` then :meth:`AsyncInvoke` will be used.
 :param DirectoryBrowseCallback callback: The function to callback on the replay thread.
+  Callback function signature must match :func:`DirectoryBrowseCallback`.
 )");
   virtual void GetHomeFolder(bool synchronous, DirectoryBrowseCallback callback) = 0;
 
@@ -1483,6 +1629,7 @@ blocking fashion on the current thread.
 :param bool synchronous: If a capture is open, then ``True`` will use :meth:`BlockInvoke` to call
   the callback. Otherwise if ``False`` then :meth:`AsyncInvoke` will be used.
 :param DirectoryBrowseCallback callback: The function to callback on the replay thread.
+  Callback function signature must match :func:`DirectoryBrowseCallback`.
 )");
   virtual void ListFolder(const rdcstr &path, bool synchronous, DirectoryBrowseCallback callback) = 0;
 
@@ -1527,12 +1674,14 @@ comes in, we remove any other requests in the queue before it that have the same
 
 :param str tag: The tag to identify this callback.
 :param InvokeCallback method: The function to callback on the replay thread.
+  Callback function signature must match :func:`InvokeCallback`.
 )");
   virtual void AsyncInvoke(const rdcstr &tag, InvokeCallback method) = 0;
 
   DOCUMENT(R"(Make a non-blocking invoke call onto the replay thread.
 
 :param InvokeCallback method: The function to callback on the replay thread.
+  Callback function signature must match :func:`InvokeCallback`.
 )");
   virtual void AsyncInvoke(InvokeCallback method) = 0;
 
@@ -1542,6 +1691,7 @@ comes in, we remove any other requests in the queue before it that have the same
   DOCUMENT(R"(Make a blocking invoke call onto the replay thread.
 
 :param InvokeCallback method: The function to callback on the replay thread.
+  Callback function signature must match :func:`InvokeCallback`.
 )");
   virtual void BlockInvoke(InvokeCallback method) = 0;
 
@@ -1695,10 +1845,16 @@ BITMASK_OPERATORS(CaptureModifications);
 DOCUMENT("A description of a bookmark on an event");
 struct EventBookmark
 {
-  DOCUMENT("The :data:`eventId <renderdoc.APIEvent.eventId>` at which this bookmark is placed.");
+  DOCUMENT(R"(The :data:`eventId <renderdoc.APIEvent.eventId>` at which this bookmark is placed.
+
+:type: int
+)");
   uint32_t eventId = 0;
 
-  DOCUMENT("The text associated with this bookmark - could be empty");
+  DOCUMENT(R"(The text associated with this bookmark - could be empty
+
+:type: str
+)");
   rdcstr text;
 
   DOCUMENT("");
@@ -2197,6 +2353,11 @@ again, any previous connection will be closed.
 )");
   virtual bool OpenRGPProfile(const rdcstr &filename) = 0;
 
+  DOCUMENT(R"(Clear any cached data from previous replays and ensure subsequent replays fully
+re-initialise any data, including e.g. bindless feedback, printf results or mesh output data.
+)");
+  virtual void ClearReplayCache() = 0;
+
   DOCUMENT(R"(Returns the current interop handle for RGP.
 
 This may return ``None`` in several cases:
@@ -2263,6 +2424,11 @@ as well as messages generated during replay and analysis.
 )");
   virtual void AddMessages(const rdcarray<DebugMessage> &msgs) = 0;
 
+  DOCUMENT(R"(Clear the currently stored messages, and mark all as unread. This can be used in
+combination with :meth:`DebugMessages` and :meth:`AddMessages` to filter the current set of messages.
+)");
+  virtual void ClearMessages() = 0;
+
   DOCUMENT(R"(Retrieve the contents for a given notes field.
 
 Examples of fields are:
@@ -2313,6 +2479,44 @@ If no bookmark exists, this function will do nothing.
 )");
   virtual void RemoveBookmark(uint32_t eventId) = 0;
 
+  DOCUMENT(R"(Stores the dependent file data into the capture i.e. shader debug files.
+
+This reads the contents of the dependent files and stores their file contents into the capture.
+This can help the capture to be more portable by embedding all externally referenced dependent files.
+Use :meth:`RemoveDependentFiles` to remove the embedded file data.
+
+.. warning::
+  Will remove all the existing embedded file data from the capture.
+  Will directly modify the capture file on disk.
+
+.. note::
+  This will increase the size of the capture file.
+  Externally referenced files which can't be found on disk are skipped.
+  For remote replay the modifications are performed on the remote machine and copied back to the local host.
+)");
+  virtual void EmbedDependentFiles() = 0;
+
+  DOCUMENT(R"(Removes the dependent files storage from the capture i.e. shader debug files.
+
+The files will be still be considered to be referenced by the capture and could be re-embedded 
+by calling :meth:`EmbedDependentFiles`.
+
+.. warning::
+  Will directly modify the capture file on disk.
+
+.. note::
+  For remote replay the modifications are performed on the remote machine and copied back to the local host.
+)");
+  virtual void RemoveDependentFiles() = 0;
+
+  DOCUMENT(R"(Registers a delayed callback to be called after a certain number of milliseconds
+on the UI thread.
+
+:param int milliseconds: The number of milliseconds (approximately) to wait before the callback.
+:param Callable[[], None] callback: The function to call
+)");
+  virtual void DelayedCallback(uint32_t milliseconds, std::function<void()> callback) = 0;
+
   DOCUMENT(R"(Retrieve the current singleton :class:`MainWindow`.
 
 :return: The current window.
@@ -2333,6 +2537,13 @@ If no bookmark exists, this function will do nothing.
 :rtype: APIInspector
 )");
   virtual IAPIInspector *GetAPIInspector() = 0;
+
+  DOCUMENT(R"(Retrieve the current singleton :class:`AnnotationViewer`.
+
+:return: The current window, which is created (but not shown) it there wasn't one open.
+:rtype: AnnotationViewer
+)");
+  virtual IAnnotationViewer *GetAnnotationViewer() = 0;
 
   DOCUMENT(R"(Retrieve the current singleton :class:`TextureViewer`.
 
@@ -2432,6 +2643,13 @@ If no bookmark exists, this function will do nothing.
 )");
   virtual bool HasAPIInspector() = 0;
 
+  DOCUMENT(R"(Check if there is a current :class:`AnnotationViewer` open.
+
+:return: ``True`` if there is a window open.
+:rtype: bool
+)");
+  virtual bool HasAnnotationViewer() = 0;
+
   DOCUMENT(R"(Check if there is a current :class:`TextureViewer` open.
 
 :return: ``True`` if there is a window open.
@@ -2520,6 +2738,9 @@ If no bookmark exists, this function will do nothing.
   virtual void ShowEventBrowser() = 0;
   DOCUMENT("Raise the current :class:`APIInspector`, showing it in the default place if needed.");
   virtual void ShowAPIInspector() = 0;
+  DOCUMENT(
+      "Raise the current :class:`AnnotationViewer`, showing it in the default place if needed.");
+  virtual void ShowAnnotationViewer() = 0;
   DOCUMENT("Raise the current :class:`TextureViewer`, showing it in the default place if needed.");
   virtual void ShowTextureViewer() = 0;
   DOCUMENT(R"(Raise the current mesh previewing :class:`BufferViewer`, showing it in the default
@@ -2567,8 +2788,10 @@ place if needed.
 :param renderdoc.ShaderCompileFlags flags: The flags originally used to compile the shader.
 :param ShaderViewer.SaveCallback saveCallback: The callback function to call when a save/update is
   triggered.
+  Callback function signature must match :func:`ShaderViewer.SaveCallback`.
 :param ShaderViewer.RevertCallback revertCallback: The callback function to call when the shader
   is to be reverted - either by user request or because the shader viewer was closed.
+  Callback function signature must match :func:`ShaderViewer.RevertCallback`.
 :return: The new :class:`ShaderViewer` window opened but not shown for editing.
 :rtype: ShaderViewer
 )");

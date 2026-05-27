@@ -1,7 +1,7 @@
 /******************************************************************************
  * The MIT License (MIT)
  *
- * Copyright (c) 2019-2024 Baldur Karlsson
+ * Copyright (c) 2016-2026 Baldur Karlsson
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -46,7 +46,7 @@ extern "C" const rdcstr VulkanLayerJSONBasename;
 #undef VK_LAYER_EXPORT
 #define VK_LAYER_EXPORT extern "C" __declspec(dllexport)
 
-#elif ENABLED(RDOC_LINUX) || ENABLED(RDOC_ANDROID)
+#elif ENABLED(RDOC_LINUX) || ENABLED(RDOC_ANDROID) || ENABLED(RDOC_APPLE)
 
 #undef VK_LAYER_EXPORT
 #define VK_LAYER_EXPORT __attribute__((visibility("default")))
@@ -137,6 +137,10 @@ class VulkanHook : LibraryHook
     Process::RegisterEnvironmentModification(
         EnvironmentModification(EnvMod::Set, EnvSep::NoSep, "DISABLE_GAMEPP_LAYER", "1"));
 
+    // buggy wegame cross overlay
+    Process::RegisterEnvironmentModification(EnvironmentModification(
+        EnvMod::Set, EnvSep::NoSep, "DISABLE_VK_LAYER_TENCENT_wegame_cross_overlay_1", "1"));
+
     // mesa device select layer crashes when it calls GPDP2 inside vkCreateInstance, which fails on
     // the current loader.
     Process::RegisterEnvironmentModification(
@@ -147,6 +151,12 @@ class VulkanHook : LibraryHook
 
     Process::RegisterEnvironmentModification(EnvironmentModification(
         EnvMod::Set, EnvSep::NoSep, "VK_LAYER_bandicam_helper_DEBUG_1", "1"));
+
+    Process::RegisterEnvironmentModification(
+        EnvironmentModification(EnvMod::Set, EnvSep::NoSep, "DISABLE_VK_LAYER_reshade_1", "1"));
+
+    Process::RegisterEnvironmentModification(
+        EnvironmentModification(EnvMod::Set, EnvSep::NoSep, "DISABLE_VK_LAYER_GPUOpen_GRS", "1"));
 
     // fpsmon not only has a buggy layer but it also picks an absurdly generic disable environment
     // variable :(. Hopefully no other program picks this, or if it does then it's probably not a
@@ -407,6 +417,9 @@ VK_LAYER_RENDERDOC_CaptureEnumerateInstanceExtensionProperties(
 #undef HookInitExtensionEXTtoKHR
 #define HookInitExtensionEXTtoKHR(func) (void)0;
 
+#undef HookInitPromotedExtensionEXTtoKHR
+#define HookInitPromotedExtensionEXTtoKHR(func) (void)0;
+
 // proc addr routines
 
 VK_LAYER_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
@@ -519,6 +532,9 @@ VK_LAYER_RENDERDOC_CaptureGetInstanceProcAddr(VkInstance instance, const char *p
 #undef HookInitExtensionEXTtoKHR
 #define HookInitExtensionEXTtoKHR(func) (void)0;
 
+#undef HookInitPromotedExtensionEXTtoKHR
+#define HookInitPromotedExtensionEXTtoKHR(func) (void)0;
+
   HookInitVulkanDevice();
 
   HookInitVulkanDeviceExts();
@@ -599,6 +615,9 @@ VK_LAYER_RENDERDOC_Capture_layerGetPhysicalDeviceProcAddr(VkInstance instance, c
 
 #undef HookInitExtensionEXTtoKHR
 #define HookInitExtensionEXTtoKHR(func) (void)0;
+
+#undef HookInitPromotedExtensionEXTtoKHR
+#define HookInitPromotedExtensionEXTtoKHR(func) (void)0;
 
   HookInitVulkanInstanceExts();
   HookInitVulkanDeviceExts();

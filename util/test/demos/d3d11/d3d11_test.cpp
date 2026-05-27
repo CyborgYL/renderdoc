@@ -1,7 +1,7 @@
 /******************************************************************************
  * The MIT License (MIT)
  *
- * Copyright (c) 2019-2024 Baldur Karlsson
+ * Copyright (c) 2018-2026 Baldur Karlsson
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -40,6 +40,13 @@ HMODULE d3dcompiler = NULL;
 IDXGIFactory1Ptr factory;
 std::vector<IDXGIAdapterPtr> adapters;
 bool warp = false;
+
+struct Capabilities
+{
+  D3D11_FEATURE_DATA_D3D11_OPTIONS opts = {};
+  D3D11_FEATURE_DATA_D3D11_OPTIONS1 opts1 = {};
+  D3D11_FEATURE_DATA_D3D11_OPTIONS2 opts2 = {};
+} caps;
 
 pD3DCompile dyn_D3DCompile = NULL;
 pD3DStripShader dyn_D3DStripShader = NULL;
@@ -98,7 +105,27 @@ void D3D11GraphicsTest::Prepare(int argc, char **argv)
       if(SUCCEEDED(hr))
         adapters = FindD3DAdapters(factory, argc, argv, warp);
     }
+
+    if(dyn_D3D11CreateDevice)
+    {
+      D3D_FEATURE_LEVEL features[] = {D3D_FEATURE_LEVEL_11_0};
+      hr = CreateDevice(NULL, NULL, features, 0);
+
+      if(SUCCEEDED(hr))
+      {
+        dev->CheckFeatureSupport(D3D11_FEATURE_D3D11_OPTIONS, &caps.opts, sizeof(caps.opts));
+        dev->CheckFeatureSupport(D3D11_FEATURE_D3D11_OPTIONS1, &caps.opts1, sizeof(caps.opts1));
+        dev->CheckFeatureSupport(D3D11_FEATURE_D3D11_OPTIONS2, &caps.opts2, sizeof(caps.opts2));
+      }
+
+      // This device was only used  to get feature support. Set it back to NULL
+      dev = NULL;
+    }
   }
+
+  opts = caps.opts;
+  opts1 = caps.opts1;
+  opts2 = caps.opts2;
 
   if(!d3d11)
     Avail = "d3d11.dll is not available";
@@ -111,22 +138,6 @@ void D3D11GraphicsTest::Prepare(int argc, char **argv)
   else if(!dyn_D3D11CreateDevice || !dyn_D3D11CreateDeviceAndSwapChain || !dyn_D3DCompile ||
           !dyn_D3DStripShader || !dyn_D3DSetBlobPart)
     Avail = "Missing required entry point";
-
-  if(dyn_D3D11CreateDevice)
-  {
-    D3D_FEATURE_LEVEL features[] = {D3D_FEATURE_LEVEL_11_0};
-    HRESULT hr = CreateDevice(NULL, NULL, features, 0);
-
-    if(SUCCEEDED(hr))
-    {
-      dev->CheckFeatureSupport(D3D11_FEATURE_D3D11_OPTIONS, &opts, sizeof(opts));
-      dev->CheckFeatureSupport(D3D11_FEATURE_D3D11_OPTIONS1, &opts1, sizeof(opts1));
-      dev->CheckFeatureSupport(D3D11_FEATURE_D3D11_OPTIONS2, &opts2, sizeof(opts2));
-    }
-
-    // This device was only used  to get feature support. Set it back to NULL
-    dev = NULL;
-  }
 }
 
 bool D3D11GraphicsTest::Init(IDXGIAdapterPtr pAdapter)
@@ -520,6 +531,16 @@ void D3D11GraphicsTest::ClearRenderTargetView(ID3D11RenderTargetView *rt, Vec4f 
   ctx->ClearRenderTargetView(rt, &col.x);
 }
 
+void D3D11GraphicsTest::ClearUnorderedAccessView(ID3D11UnorderedAccessView *uav, Vec4f col)
+{
+  ctx->ClearUnorderedAccessViewFloat(uav, &col.x);
+}
+
+void D3D11GraphicsTest::ClearUnorderedAccessView(ID3D11UnorderedAccessView *uav, Vec4u col)
+{
+  ctx->ClearUnorderedAccessViewUint(uav, &col.x);
+}
+
 void D3D11GraphicsTest::RSSetViewport(D3D11_VIEWPORT view)
 {
   ctx->RSSetViewports(1, &view);
@@ -632,7 +653,7 @@ ID3DBlobPtr D3D11GraphicsTest::Compile(std::string src, std::string entry, std::
   if(skipoptimise)
     flags |= D3DCOMPILE_SKIP_OPTIMIZATION | D3DCOMPILE_OPTIMIZATION_LEVEL0;
   else
-    flags |= D3DCOMPILE_OPTIMIZATION_LEVEL0;
+    flags |= D3DCOMPILE_OPTIMIZATION_LEVEL1;
 
   HRESULT hr = dyn_D3DCompile(src.c_str(), src.length(), "", NULL, NULL, entry.c_str(),
                               profile.c_str(), flags, 0, &blob, &error);

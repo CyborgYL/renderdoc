@@ -1,7 +1,7 @@
 /******************************************************************************
  * The MIT License (MIT)
  *
- * Copyright (c) 2019-2024 Baldur Karlsson
+ * Copyright (c) 2018-2026 Baldur Karlsson
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -34,6 +34,8 @@
 #include "d3d12_device.h"
 
 RDOC_CONFIG(rdcstr, D3D12_DXCPath, "", "The location of the dxcompiler.dll library to use.");
+
+RDOC_EXTERN_CONFIG(bool, D3D12_Debug_EnableGPUVA);
 
 static void *SearchForDXC(rdcstr &path)
 {
@@ -345,20 +347,40 @@ D3D12ShaderCache::D3D12ShaderCache(WrappedID3D12Device *device)
   // if we failed to load from the cache
   m_ShaderCacheDirty = !success;
 
-  static const GUID IRenderDoc_uuid = {
-      0xa7aa6116, 0x9c8d, 0x4bba, {0x90, 0x83, 0xb4, 0xd8, 0x16, 0xb7, 0x1b, 0x78}};
+  bool unopt = false;
 
-  // if we're being self-captured, the 'real' device will respond to renderdoc's UUID. Enable debug
-  // shaders
-  IUnknown *dummy = NULL;
-  if(device->GetReal())
-    device->GetReal()->QueryInterface(IRenderDoc_uuid, (void **)&dummy);
+  if(RenderDoc::Inst().IsReplayApp())
+  {
+    static const GUID IRenderDoc_uuid = {
+        0xa7aa6116, 0x9c8d, 0x4bba, {0x90, 0x83, 0xb4, 0xd8, 0x16, 0xb7, 0x1b, 0x78}};
 
-  if(dummy)
+    // if we're being self-captured, the 'real' device will respond to renderdoc's UUID. Enable
+    // debug shaders
+    IUnknown *dummy = NULL;
+    if(device->GetReal())
+      device->GetReal()->QueryInterface(IRenderDoc_uuid, (void **)&dummy);
+
+    if(dummy != NULL)
+    {
+      RDCLOG("Unoptimising internal shaders for self-capture of replay");
+
+      unopt = true;
+    }
+
+    SAFE_RELEASE(dummy);
+  }
+
+  if(D3D12_Debug_EnableGPUVA())
+  {
+    RDCLOG("Unoptimising internal shaders for GPUVA");
+
+    unopt = true;
+  }
+
+  if(unopt)
   {
     m_CompileFlags |=
         D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION | D3DCOMPILE_OPTIMIZATION_LEVEL0;
-    SAFE_RELEASE(dummy);
   }
 }
 
@@ -493,6 +515,24 @@ rdcstr D3D12ShaderCache::GetShaderBlob(const char *source, const char *entry,
       uint32_t flags = DXBC::DecodeFlags(compileFlags) & ~D3DCOMPILE_NO_PRESHADER;
       rdcarray<rdcwstr> argsData;
       DXBC::EncodeDXCFlags(flags, argsData);
+      for(const ShaderCompileFlag &flag : compileFlags.flags)
+      {
+        if(flag.name == "@compile_option")
+          argsData.push_back(StringFormat::UTF82Wide(flag.value));
+      }
+
+      OSUtility::DLLFileVersion version = OSUtility::GetDLLVersion(dxc);
+
+      // this parameter is _necessary_ on older versions of dxc to not use dxil.dll but _invalid_ on
+      // old versions, and then again invalid but not necessary for newer versions
+      //
+      // dxc versions named 10.x.x.x by windows SDKs are considered old, pre 1.7 at least
+      if(version.major != 10 && version.major == 1 && version.minor == 8 && version.build >= 2403)
+      {
+        if(version.build < 2505)
+          argsData.push_back(L"-select-validator internal");
+      }
+
       rdcarray<LPCWSTR> arguments;
       for(const rdcwstr &arg : argsData)
         arguments.push_back(arg.c_str());

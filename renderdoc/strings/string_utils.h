@@ -1,7 +1,7 @@
 /******************************************************************************
  * The MIT License (MIT)
  *
- * Copyright (c) 2019-2024 Baldur Karlsson
+ * Copyright (c) 2015-2026 Baldur Karlsson
  * Copyright (c) 2014 Crytek
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -31,7 +31,8 @@
 rdcstr strlower(const rdcstr &str);
 rdcstr strupper(const rdcstr &str);
 
-uint32_t strhash(const char *str, uint32_t existingHash = 5381);
+uint32_t strhash(const char *str, uint32_t existingHash);
+uint32_t strhash(const char *str);
 
 rdcstr get_basename(const rdcstr &path);
 rdcstr get_dirname(const rdcstr &path);

@@ -1,7 +1,7 @@
 /******************************************************************************
  * The MIT License (MIT)
  *
- * Copyright (c) 2019-2024 Baldur Karlsson
+ * Copyright (c) 2015-2026 Baldur Karlsson
  * Copyright (c) 2014 Crytek
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -110,6 +110,12 @@ version of RenderDoc that addes a new section type. They should be considered eq
   This section contains an internal copy of D3D12SDKLayers for replaying.
 
   The name for this section will be "renderdoc/internal/d3d12sdklayers".
+
+.. data:: EmbeddedExternalFiles
+
+  This section contains externally referenced files that have been embedded into the capture.
+
+  The name for this section will be "renderdoc/internal/embeddedexternalfiles".
 )");
 enum class SectionType : uint32_t
 {
@@ -126,6 +132,7 @@ enum class SectionType : uint32_t
   EditedShaders,
   D3D12Core,
   D3D12SDKLayers,
+  EmbeddedExternalFiles,
   Count,
 };
 
@@ -354,7 +361,7 @@ DOCUMENT(R"(Represents the component type of a channel in a texture or element i
 
 .. data:: SScaled
 
-  A signed scaled floating point value. This is converted from the input unsigned integer without
+  A signed scaled floating point value. This is converted from the input signed integer without
   any normalisation as with :data:`SNorm`, so the resulting values range from the minimum signed
   integer value ``-2^(N-1)`` to the maximum signed integer value ``2^(N-1) - 1``.
 
@@ -2195,7 +2202,7 @@ tool.
 
 :param KnownShaderTool tool: The tool to get the input encoding for.
 :return: The encoding that this tool expects as an input by default.
-:rtype: renderdoc.ShaderEncoding
+:rtype: ShaderEncoding
 )");
 constexpr inline ShaderEncoding ToolInput(KnownShaderTool tool)
 {
@@ -2222,7 +2229,7 @@ tool.
 
 :param KnownShaderTool tool: The tool to get the output encoding for.
 :return: The encoding that this tool produces as an output by default.
-:rtype: renderdoc.ShaderEncoding
+:rtype: ShaderEncoding
 )");
 constexpr inline ShaderEncoding ToolOutput(KnownShaderTool tool)
 {
@@ -4216,6 +4223,10 @@ a remote server.
 .. data:: CompressionFailed
 
   Compression or decompression failed.
+
+.. data:: AndroidLayerConfFailed
+
+  Debug layer configuration failed on Android.
 )");
 enum class ResultCode : uint32_t
 {
@@ -4251,6 +4262,7 @@ enum class ResultCode : uint32_t
   DataNotAvailable,
   InvalidParameter,
   CompressionFailed,
+  AndroidLayerConfFailed,
 };
 
 DECLARE_REFLECTION_ENUM(ResultCode);
@@ -4874,12 +4886,17 @@ DOCUMENT(R"(A set of flags for events that may occur while debugging a shader
 .. data:: GeneratedNanOrInf
 
   A floating point operation generated a ``NaN`` or ``infinity`` result.
+
+.. data:: DebugBreak
+
+  A debugbreak event was emitted.
 )");
 enum class ShaderEvents : uint32_t
 {
   NoEvent = 0,
   SampleLoadGather = 0x1,
   GeneratedNanOrInf = 0x2,
+  DebugBreak = 0x4,
 };
 
 BITMASK_OPERATORS(ShaderEvents);
@@ -4929,6 +4946,16 @@ displayed
 .. data:: Truncated
 
   This value was truncated when reading - the available range was exhausted.
+
+.. data:: SignedEnum
+
+  For enums, the base type is a signed integer allowing signed values.
+
+.. data:: SingleElementArray
+
+  In some cases it can be possible to represent and need to distinguish a variable declared as
+  an array of size 1 from a scalar object. This flag indicates that even though elements == 1
+  normally means 'not an array', in this case it means an array of size 1.
 )");
 enum class ShaderVariableFlags : uint32_t
 {
@@ -4942,6 +4969,8 @@ enum class ShaderVariableFlags : uint32_t
   UNorm = 0x0040,
   SNorm = 0x0080,
   Truncated = 0x0100,
+  SignedEnum = 0x0200,
+  SingleElementArray = 0x0400,
 };
 
 BITMASK_OPERATORS(ShaderVariableFlags);

@@ -1,7 +1,7 @@
 /******************************************************************************
  * The MIT License (MIT)
  *
- * Copyright (c) 2019-2024 Baldur Karlsson
+ * Copyright (c) 2024-2026 Baldur Karlsson
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -24,6 +24,7 @@
 
 #include "dxil_bytecode.h"
 #include "dxil_common.h"
+#include "dxil_debug.h"
 #include "dxil_debuginfo.h"
 
 template <>
@@ -126,6 +127,52 @@ rdcstr DoStringise(const DXIL::AtomicBinOpCode &el)
   }
   END_ENUM_STRINGISE();
 }
+
+template <>
+rdcstr DoStringise(const DXIL::QuadOpKind &el)
+{
+  BEGIN_ENUM_STRINGISE(DXIL::QuadOpKind)
+  {
+    STRINGISE_ENUM_CLASS(ReadAcrossX)
+    STRINGISE_ENUM_CLASS(ReadAcrossY)
+    STRINGISE_ENUM_CLASS(ReadAcrossDiagonal)
+  }
+  END_ENUM_STRINGISE();
+};
+
+template <>
+rdcstr DoStringise(const DXIL::QuadVoteOpKind &el)
+{
+  BEGIN_ENUM_STRINGISE(DXIL::QuadVoteOpKind)
+  {
+    STRINGISE_ENUM_CLASS(All)
+    STRINGISE_ENUM_CLASS(Any)
+  }
+  END_ENUM_STRINGISE();
+};
+
+template <>
+rdcstr DoStringise(const DXIL::PackMode &el)
+{
+  BEGIN_ENUM_STRINGISE(DXIL::PackMode)
+  {
+    STRINGISE_ENUM_CLASS(Trunc)
+    STRINGISE_ENUM_CLASS(UClamp)
+    STRINGISE_ENUM_CLASS(SClamp)
+  }
+  END_ENUM_STRINGISE();
+};
+
+template <>
+rdcstr DoStringise(const DXIL::UnpackMode &el)
+{
+  BEGIN_ENUM_STRINGISE(DXIL::UnpackMode)
+  {
+    STRINGISE_ENUM_CLASS(Unsigned)
+    STRINGISE_ENUM_CLASS(Signed)
+  }
+  END_ENUM_STRINGISE();
+};
 
 template <>
 rdcstr DoStringise(const DXIL::Operation &el)
@@ -524,13 +571,17 @@ rdcstr DoStringise(const DXIL::Type::ScalarKind &el)
 }
 
 template <>
-rdcstr DoStringise(const DXIL::LLVMDbgOp &el)
+rdcstr DoStringise(const DXIL::LLVMIntrinsicOp &el)
 {
-  BEGIN_ENUM_STRINGISE(DXIL::LLVMDbgOp);
+  BEGIN_ENUM_STRINGISE(DXIL::LLVMIntrinsicOp);
   {
-    STRINGISE_ENUM_CLASS(Declare);
-    STRINGISE_ENUM_CLASS(Value);
     STRINGISE_ENUM_CLASS(Unknown);
+    STRINGISE_ENUM_CLASS(DbgDeclare);
+    STRINGISE_ENUM_CLASS(DbgValue);
+    STRINGISE_ENUM_CLASS(LifetimeStart);
+    STRINGISE_ENUM_CLASS(LifetimeEnd);
+    STRINGISE_ENUM_CLASS(InvariantStart);
+    STRINGISE_ENUM_CLASS(InvariantEnd);
   }
   END_ENUM_STRINGISE();
 }
@@ -724,6 +775,156 @@ rdcstr DoStringise(const DXIL::DW_OP &el)
     STRINGISE_ENUM_CLASS(DW_OP_GNU_push_tls_address);
     STRINGISE_ENUM_CLASS(DW_OP_GNU_addr_index);
     STRINGISE_ENUM_CLASS(DW_OP_GNU_const_index);
+  }
+  END_ENUM_STRINGISE();
+};
+
+template <>
+rdcstr DoStringise(const DXIL::ValueKind &el)
+{
+  BEGIN_ENUM_STRINGISE(DXIL::ValueKind);
+  {
+    STRINGISE_ENUM_CLASS(ForwardReferencePlaceholder);
+    STRINGISE_ENUM_CLASS(Literal);
+    STRINGISE_ENUM_CLASS(Alias);
+    STRINGISE_ENUM_CLASS(Constant);
+    STRINGISE_ENUM_CLASS(GlobalVar);
+    STRINGISE_ENUM_CLASS(Metadata);
+    STRINGISE_ENUM_CLASS(Instruction);
+    STRINGISE_ENUM_CLASS(Function);
+    STRINGISE_ENUM_CLASS(BasicBlock);
+  }
+  END_ENUM_STRINGISE();
+};
+
+template <>
+rdcstr DoStringise(const DXIL::BarrierMode &el)
+{
+  BEGIN_BITFIELD_STRINGISE(DXIL::BarrierMode);
+  {
+    STRINGISE_BITFIELD_CLASS_BIT(Invalid);
+    STRINGISE_BITFIELD_CLASS_BIT(SyncThreadGroup);
+    STRINGISE_BITFIELD_CLASS_BIT(UAVFenceGlobal);
+    STRINGISE_BITFIELD_CLASS_BIT(UAVFenceThreadGroup);
+    STRINGISE_BITFIELD_CLASS_BIT(TGSMFence);
+  }
+  END_BITFIELD_STRINGISE();
+};
+
+template <>
+rdcstr DoStringise(const DXIL::ResourceKind &el)
+{
+  BEGIN_ENUM_STRINGISE(DXIL::ResourceKind);
+  {
+    STRINGISE_ENUM_CLASS(Unknown);
+    STRINGISE_ENUM_CLASS(Texture1D);
+    STRINGISE_ENUM_CLASS(Texture2D);
+    STRINGISE_ENUM_CLASS(Texture2DMS);
+    STRINGISE_ENUM_CLASS(Texture3D);
+    STRINGISE_ENUM_CLASS(TextureCube);
+    STRINGISE_ENUM_CLASS(Texture1DArray);
+    STRINGISE_ENUM_CLASS(Texture2DArray);
+    STRINGISE_ENUM_CLASS(Texture2DMSArray);
+    STRINGISE_ENUM_CLASS(TextureCubeArray);
+    STRINGISE_ENUM_CLASS(TypedBuffer);
+    STRINGISE_ENUM_CLASS(RawBuffer);
+    STRINGISE_ENUM_CLASS(StructuredBuffer);
+    STRINGISE_ENUM_CLASS(CBuffer);
+    STRINGISE_ENUM_CLASS(Sampler);
+    STRINGISE_ENUM_CLASS(TBuffer);
+    STRINGISE_ENUM_CLASS(RTAccelerationStructure);
+    STRINGISE_ENUM_CLASS(FeedbackTexture2D);
+    STRINGISE_ENUM_CLASS(FeedbackTexture2DArray);
+    STRINGISE_ENUM_CLASS(StructuredBufferWithCounter);
+    STRINGISE_ENUM_CLASS(SamplerComparison);
+  }
+  END_ENUM_STRINGISE();
+};
+
+template <>
+rdcstr DoStringise(const DXIL::WaveOpCode &el)
+{
+  BEGIN_ENUM_STRINGISE(DXIL::WaveOpCode)
+  {
+    STRINGISE_ENUM_CLASS(Sum)
+    STRINGISE_ENUM_CLASS(Product)
+    STRINGISE_ENUM_CLASS(Min)
+    STRINGISE_ENUM_CLASS(Max)
+  }
+  END_ENUM_STRINGISE();
+}
+
+template <>
+rdcstr DoStringise(const DXIL::SignedOpKind &el)
+{
+  BEGIN_ENUM_STRINGISE(DXIL::SignedOpKind)
+  {
+    STRINGISE_ENUM_CLASS(Signed)
+    STRINGISE_ENUM_CLASS(Unsigned)
+  }
+  END_ENUM_STRINGISE();
+}
+
+template <>
+rdcstr DoStringise(const DXIL::WaveBitOpCode &el)
+{
+  BEGIN_ENUM_STRINGISE(DXIL::WaveBitOpCode)
+  {
+    STRINGISE_ENUM_CLASS(And)
+    STRINGISE_ENUM_CLASS(Or)
+    STRINGISE_ENUM_CLASS(Xor)
+  }
+  END_ENUM_STRINGISE();
+}
+
+template <>
+rdcstr DoStringise(const DXIL::WaveMultiPrefixOpCode &el)
+{
+  BEGIN_ENUM_STRINGISE(DXIL::WaveMultiPrefixOpCode)
+  {
+    STRINGISE_ENUM_CLASS(Sum)
+    STRINGISE_ENUM_CLASS(And)
+    STRINGISE_ENUM_CLASS(Or)
+    STRINGISE_ENUM_CLASS(Xor)
+    STRINGISE_ENUM_CLASS(Product)
+  }
+  END_ENUM_STRINGISE();
+}
+
+template <>
+rdcstr DoStringise(const DXILDebug::StepThreadMode &el)
+{
+  BEGIN_ENUM_STRINGISE(DXILDebug::StepThreadMode)
+  {
+    STRINGISE_ENUM_CLASS(RUN_SINGLE_STEP)
+    STRINGISE_ENUM_CLASS(RUN_MULTIPLE_STEPS)
+    STRINGISE_ENUM_CLASS(QUEUE_SINGLE_STEP)
+    STRINGISE_ENUM_CLASS(QUEUE_MULTIPLE_STEPS)
+  }
+  END_ENUM_STRINGISE();
+};
+
+template <>
+rdcstr DoStringise(const DXILDebug::DeviceOpResult &el)
+{
+  BEGIN_ENUM_STRINGISE(DXILDebug::DeviceOpResult)
+  {
+    STRINGISE_ENUM_CLASS(Unknown)
+    STRINGISE_ENUM_CLASS(Succeeded)
+    STRINGISE_ENUM_CLASS(Failed)
+    STRINGISE_ENUM_CLASS(NeedsDevice)
+  }
+  END_ENUM_STRINGISE();
+};
+
+template <>
+rdcstr DoStringise(const DXILDebug::ThreadState::PendingResultStatus &el)
+{
+  BEGIN_ENUM_STRINGISE(DXILDebug::ThreadState::PendingResultStatus)
+  {
+    STRINGISE_ENUM_CLASS(Unknown)
+    STRINGISE_ENUM_CLASS(Pending)
+    STRINGISE_ENUM_CLASS(Ready)
   }
   END_ENUM_STRINGISE();
 };

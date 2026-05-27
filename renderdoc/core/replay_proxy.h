@@ -1,7 +1,7 @@
 /******************************************************************************
  * The MIT License (MIT)
  *
- * Copyright (c) 2019-2024 Baldur Karlsson
+ * Copyright (c) 2015-2026 Baldur Karlsson
  * Copyright (c) 2014 Crytek
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -66,7 +66,6 @@ enum ReplayProxyPacket
 
   eReplayProxy_SavePipelineState,
   eReplayProxy_GetUsage,
-  eReplayProxy_GetLiveID,
   eReplayProxy_GetFrameRecord,
   eReplayProxy_IsRenderOutput,
   eReplayProxy_NeedRemapForFetch,
@@ -89,6 +88,7 @@ enum ReplayProxyPacket
   eReplayProxy_DebugVertex,
   eReplayProxy_DebugPixel,
   eReplayProxy_DebugThread,
+  eReplayProxy_DebugMeshThread,
 
   eReplayProxy_RenderOverlay,
 
@@ -111,6 +111,9 @@ enum ReplayProxyPacket
   eReplayProxy_GetDescriptorAccess,
   eReplayProxy_GetDescriptorLocations,
   eReplayProxy_GetDescriptorStores,
+
+  eReplayProxy_ClearReplayCache,
+  eReplayProxy_ReloadShaderDebugInformation,
 };
 
 DECLARE_REFLECTION_ENUM(ReplayProxyPacket);
@@ -183,11 +186,6 @@ public:
   {
     if(m_Proxy)
       return m_Proxy->GetOutputWindowDimensions(id, w, h);
-  }
-  void SetOutputWindowDimensions(uint64_t id, int32_t w, int32_t h)
-  {
-    if(m_Proxy)
-      m_Proxy->SetOutputWindowDimensions(id, w, h);
   }
   void GetOutputWindowData(uint64_t id, bytebuf &retData)
   {
@@ -501,8 +499,6 @@ public:
 
   IMPLEMENT_FUNCTION_PROXIED(bool, IsRenderOutput, ResourceId id);
 
-  IMPLEMENT_FUNCTION_PROXIED(ResourceId, GetLiveID, ResourceId id);
-
   IMPLEMENT_FUNCTION_PROXIED(rdcarray<GPUCounter>, EnumerateCounters);
   IMPLEMENT_FUNCTION_PROXIED(CounterDescription, DescribeCounter, GPUCounter counterID);
   IMPLEMENT_FUNCTION_PROXIED(rdcarray<CounterResult>, FetchCounters,
@@ -533,7 +529,7 @@ public:
                              const rdcarray<uint32_t> &passEvents);
 
   IMPLEMENT_FUNCTION_PROXIED(rdcarray<ShaderEntryPoint>, GetShaderEntryPoints, ResourceId shader);
-  IMPLEMENT_FUNCTION_PROXIED(ShaderReflection *, GetShader, ResourceId pipeline, ResourceId,
+  IMPLEMENT_FUNCTION_PROXIED(const ShaderReflection *, GetShader, ResourceId pipeline, ResourceId,
                              ShaderEntryPoint entry);
 
   IMPLEMENT_FUNCTION_PROXIED(rdcarray<rdcstr>, GetDisassemblyTargets, bool withPipeline);
@@ -552,6 +548,9 @@ public:
   IMPLEMENT_FUNCTION_PROXIED(ShaderDebugTrace *, DebugThread, uint32_t eventId,
                              const rdcfixedarray<uint32_t, 3> &groupid,
                              const rdcfixedarray<uint32_t, 3> &threadid);
+  IMPLEMENT_FUNCTION_PROXIED(ShaderDebugTrace *, DebugMeshThread, uint32_t eventId,
+                             const rdcfixedarray<uint32_t, 3> &groupid,
+                             const rdcfixedarray<uint32_t, 3> &threadid);
   IMPLEMENT_FUNCTION_PROXIED(rdcarray<ShaderDebugState>, ContinueDebug, ShaderDebugger *debugger);
   IMPLEMENT_FUNCTION_PROXIED(void, FreeDebugger, ShaderDebugger *debugger);
 
@@ -562,6 +561,8 @@ public:
                              ResourceId &id, rdcstr &errors);
   IMPLEMENT_FUNCTION_PROXIED(void, ReplaceResource, ResourceId from, ResourceId to);
   IMPLEMENT_FUNCTION_PROXIED(void, RemoveReplacement, ResourceId id);
+  IMPLEMENT_FUNCTION_PROXIED(void, ClearReplayCache);
+  IMPLEMENT_FUNCTION_PROXIED(void, ReloadShaderDebugInformation);
 
   // these functions are not part of the replay driver interface - they are similar to GetBufferData
   // and GetTextureData, but they do extra work to try and optimise transfer by delta-encoding the
@@ -655,8 +656,6 @@ private:
   // should not be treated as proxied.
   std::set<ResourceId> m_LocalTextures;
 
-  std::map<ResourceId, ResourceId> m_LiveIDs;
-
   struct ShaderReflKey
   {
     ShaderReflKey() {}
@@ -677,7 +676,7 @@ private:
     }
   };
 
-  std::map<ShaderReflKey, ShaderReflection *> m_ShaderReflectionCache;
+  std::map<ShaderReflKey, const ShaderReflection *> m_ShaderReflectionCache;
 
   // reader from the other side of the host <-> remote connection
   ReadSerialiser &m_Reader;

@@ -100,6 +100,8 @@ def make_c_type(ret: str, pattern: bool, typelist: List[str]):
         ret = 'rdcstrpairs'
     elif ret == 'Tuple[str,str]': # special case
         ret = 'rdcstrpair'
+    elif ret[0:9] == 'Callable[':
+        ret = '(std::function<void\(\)>|[A-Za-z_]+Callback)' if pattern else 'std::function/NamedCallback'
     elif ret[0:5] == 'List[':
         inner = make_c_type(ret[5:-1], pattern, typelist)
         ret = '(const )?rdcarray<{}> ?[&*]?'.format(inner) if pattern else 'rdcarray<{}>'.format(inner)
@@ -109,7 +111,14 @@ def make_c_type(ret: str, pattern: bool, typelist: List[str]):
             inner = ',\s*'.join(inners)
         else:
             inner = ', '.join(inners)
-        ret = '(const )?rdcpair<{}> ?[&*]?'.format(inner) if pattern else 'rdcpair<{}>'.format(inner)
+
+        tuple_len = len(inners)
+
+        if tuple_len > 2 and len(list(set(inners))) == 1:
+            inner = inners[0]
+            ret = '(const )?rdcfixedarray<{}, {}> ?[&*]?'.format(inner, tuple_len) if pattern else 'rdcfixedarray<{}, {}>'.format(inner, tuple_len)
+        else:
+            ret = '(const )?rdcpair<{}> ?[&*]?'.format(inner) if pattern else 'rdcpair<{}>'.format(inner)
     elif pattern:
         if ret[-8:] == 'Callback':
             ret = '(RENDERDOC_)?{}'.format(ret)
@@ -124,6 +133,7 @@ def make_c_type(ret: str, pattern: bool, typelist: List[str]):
 RTYPE_PATTERN = re.compile(r":rtype: (.*)")
 PARAM_PATTERN = re.compile(r":param ([^:]*) ([^: ]*):")
 TYPE_PATTERN = re.compile(r":type: (.*)")
+DATA_PATTERN = re.compile(r"\.\. data:: (.*)")
 
 count = 0
 
@@ -132,6 +142,9 @@ def check_function(parent_name, objname, obj, source, global_func, typelist):
 
     if args.verbose:
         print("Checking {} function {}.{}".format('global' if global_func else 'member', parent_name, objname))
+
+    if obj.__class__ is staticmethod:
+        obj = obj.__func__
 
     docstring = obj.__doc__
 
@@ -221,7 +234,8 @@ def check_used_types(objname, module, used_types):
                 print("  - Maybe missing namespace to refer to renderdoc.{}?".format(type_name))
             break
 
-for mod_name in ['renderdoc', 'qrenderdoc']:
+check_mods = ['renderdoc', 'qrenderdoc']
+for mod_name in check_mods:
     mod = sys.modules[mod_name]
     if args.verbose:
         print("===== Checks for {} =====".format(mod_name))
@@ -284,6 +298,14 @@ for mod_name in ['renderdoc', 'qrenderdoc']:
             except TypeError:
                 pass
 
+            # a couple of manual cases that need parameters
+            if qualname == 'renderdoc.SDObject' and instance is None:
+                instance = obj("", "")
+            if qualname == 'renderdoc.SDChunk' and instance is None:
+                instance = obj("")
+
+            instance_warned = False
+
             for member_name in obj.__dict__.keys():
                 if '__' in member_name or member_name in ['this', 'thisown']:
                     continue
@@ -291,11 +313,15 @@ for mod_name in ['renderdoc', 'qrenderdoc']:
                 member = obj.__dict__[member_name]
 
                 # Skip some known functions that cannot be easily matched this way
-                if '{}.{}'.format(objname, member_name) in ['RemoteHost.Connect',
+                if '{}.{}'.format(objname, member_name) in [
+                                                            # pointer output remapped to tuple return
+                                                            'RemoteHost.Connect',
+                                                            # class-local callbacks
                                                             'CaptureContext.EditShader',
-                                                            'ReplayController.DebugThread',
-                                                            'ReplayController.GetHistogram',
+                                                            # Renamed in the interface from DuplicateAndAddChild
                                                             'SDObject.AddChild',
+                                                            # not defined in the actual code since we have typed AsInt32 etc.
+                                                            # Instead defined in the swig interface
                                                             'SDObject.AsInt',
                                                             'SDObject.AsFloat',
                                                             'SDObject.AsString']:
@@ -324,11 +350,26 @@ for mod_name in ['renderdoc', 'qrenderdoc']:
                     type_name = re.sub('StructuredBufferList', 'List[bytes]', type_name)
                     type_name = re.sub('StructuredObjectList', 'List[SDObject]', type_name)
                     type_name = re.sub('StructuredChunkList', 'List[SDChunk]', type_name)
+                    type_name = re.sub('^builtins.', '', type_name)
 
-                    # Maybe in future we could enforce :type: on all members? For now we
-                    # only really care about ones we might want to access properties on,
-                    # so not builtin types (lists/tuples excluded) or ResourceId
-                    if type(value).__module__ not in [rd.__name__, qrd.__name__] or type_name == 'ResourceId' and type(value) is not tuple:
+                    if 'importlib._bootstrap' in type_name:
+                        type_name = re.sub('^importlib._bootstrap.', '', type_name)
+                        real_module = [
+                            m for m in check_mods if type_name in sys.modules[m].__dict__
+                        ][0]
+                        if real_module != mod_name:
+                            type_name = f"{real_module}.{type_name}"
+
+                    type_name = re.sub('datetime.datetime', 'datetime', type_name)
+
+                    if type_name == 'NoneType':
+                        if args.verbose:
+                            print(f"Skipping {objname}.{member_name} as pointer-assumed from None")
+                        continue
+
+                    if objname == 'ResourceId' and member_name == 'Null' and 'function' in type_name:
+                        if args.verbose:
+                            print("Skipping ResourceId")
                         continue
 
                     if args.verbose:
@@ -343,9 +384,22 @@ for mod_name in ['renderdoc', 'qrenderdoc']:
                     if type_decl is None:
                         count += 1
                         print("Error {:3}: {}.{} is missing :type: declaration, should be {}".format(count, qualname, member_name, type_name))
-                    elif type_decl != type_name:
+                    else:
+                        type_decl = re.sub('Tuple\[.*\]', 'tuple', type_decl)
+                        if type_decl != type_name:
+                            count += 1
+                            print("Error {:3}: {}.{} has wrong :type: declaration {}, should be {}".format(count, qualname, member_name, type_decl, type_name))
+                elif instance is None and '__get__' in dir(member):
+                    if not instance_warned:
+                        print(f"WARNING: Couldn't create a {qualname} to check some members")
+                        instance_warned = True
+                elif type(member) == int:
+                    datas = DATA_PATTERN.findall(docstring)
+
+                    if member_name not in datas:
                         count += 1
-                        print("Error {:3}: {}.{} has wrong :type: declaration {}, should be {}".format(count, qualname, member_name, type_decl, type_name))
+                        print("Error {:3}: {}.{} is missing a .. data: declaration in object docstring".format(count, qualname, member_name))
+
         elif callable(obj):
             used_types = []
 

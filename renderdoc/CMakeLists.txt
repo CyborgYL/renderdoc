@@ -132,6 +132,7 @@ set(sources
     common/result.h
     common/shader_cache.h
     common/jobsystem.cpp
+    common/tex_data.h
     common/threading.h
     common/timing.h
     common/wrapped_pool.h
@@ -147,6 +148,7 @@ set(sources
     core/remote_server.h
     core/settings.cpp
     core/settings.h
+    core/rdcbytetrie.h
     core/replay_proxy.cpp
     core/replay_proxy.h
     core/intervals.h
@@ -213,6 +215,8 @@ set(sources
     serialise/comp_io_tests.cpp
     serialise/serialiser_tests.cpp
     serialise/streamio_tests.cpp
+    shaders/controlflow.cpp
+    shaders/controlflow.h
     strings/grisu2.cpp
     strings/string_utils.cpp
     strings/string_utils.h
@@ -473,6 +477,9 @@ set(data
     data/glsl/vk_depthms2buffer.comp
     data/glsl/vk_buffer2ms.comp
     data/glsl/vk_depthbuf2ms.frag
+    data/glsl/debug_math.comp
+    data/glsl/debug_sample.frag
+    data/hlsl/quadswizzle.hlsl
     data/sourcecodepro.ttf
     driver/vulkan/renderdoc.json)
 
@@ -584,7 +591,7 @@ if(ENABLE_GL OR ENABLE_GLES)
 endif()
 
 # pull in the NVIDIA folder
-if(NOT ANDROID AND NOT APPLE AND (ENABLE_GL OR ENABLE_GLES OR ENABLE_VULKAN))
+if(ENABLE_GL OR ENABLE_GLES OR ENABLE_VULKAN)
     add_subdirectory(driver/ihv/nv)
     list(APPEND renderdoc_objects $<TARGET_OBJECTS:rdoc_nv>)
 endif()

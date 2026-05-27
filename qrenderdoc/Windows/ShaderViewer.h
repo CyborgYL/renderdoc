@@ -1,7 +1,7 @@
 /******************************************************************************
  * The MIT License (MIT)
  *
- * Copyright (c) 2019-2024 Baldur Karlsson
+ * Copyright (c) 2017-2026 Baldur Karlsson
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -44,6 +44,7 @@ class QTableWidgetItem;
 class QKeyEvent;
 class QMouseEvent;
 class QComboBox;
+class QTextEdit;
 
 // from Scintilla
 typedef intptr_t sptr_t;
@@ -99,6 +100,19 @@ struct VariableTag
 
   DebugVariableType debugVarType = DebugVariableType::Undefined;
   rdcstr absoluteRefPath;
+};
+
+struct ResourceReference
+{
+  ResourceReference() {}
+  ResourceReference(ShaderBindIndex bp) : bind(bp), directAccess(false) {}
+  ResourceReference(ShaderDirectAccess acc) : access(acc), directAccess(true) {}
+  union
+  {
+    ShaderBindIndex bind;
+    ShaderDirectAccess access;
+  };
+  bool directAccess;
 };
 
 class ShaderViewer : public QFrame, public IShaderViewer, public ICaptureViewer
@@ -176,6 +190,7 @@ private slots:
   void on_intView_clicked();
   void on_floatView_clicked();
   void on_debugToggle_clicked();
+  void on_toggleLog_clicked();
 
   void on_resources_sortByStep_clicked();
   void on_resources_sortByResource_clicked();
@@ -224,7 +239,8 @@ private:
 
   void PopulateCompileTools();
   void PopulateCompileToolParameters();
-  bool ProcessIncludeDirectives(QString &source, const rdcstrpairs &files);
+  bool ProcessIncludeDirectives(QString &source, const rdcstrpairs &files,
+                                rdcarray<rdcstr> &allIncluded, const rdcarray<rdcstr> &exclude = {});
 
   void updateWindowTitle();
   void gotoSourceDebugging();
@@ -336,11 +352,15 @@ private:
   QSet<QPair<int, uint32_t>> m_Breakpoints;
   bool m_TempBreakpoint = false;
 
+  std::map<ShaderDirectAccess, rdcstr> m_LogicalBindNames;
+
   QList<QPair<ScintillaEdit *, int>> m_FindAllResults;
 
   static const int BOOKMARK_MAX_MENU_ENTRY_LENGTH = 40;    // max length of bookmark names in menu
   static const int BOOKMARK_MAX_MENU_ENTRY_COUNT = 30;     // max number of bookmarks listed in menu
   QMap<ScintillaEdit *, QList<sptr_t>> m_Bookmarks;
+
+  QTextEdit *debugInfoLog = NULL;
 
   static const int CURRENT_MARKER = 0;
   static const int BREAKPOINT_MARKER = 2;
@@ -386,8 +406,8 @@ private:
   void updateDebugState();
   void markWatchStale(RDTreeWidgetItem *item);
   bool updateWatchVariable(RDTreeWidgetItem *watchItem, const RDTreeWidgetItem *varItem,
-                           const rdcstr &path, uint32_t swizzle, const ShaderVariable &var,
-                           QChar regcast);
+                           const rdcstr &path, uint32_t swizzle, const SourceVariableMapping &mapping,
+                           const ShaderVariable &var, QChar regcast);
   void updateWatchVariables();
 
   void updateAccessedResources();
@@ -423,7 +443,7 @@ private:
   void runTo(const rdcarray<uint32_t> &runToInstructions, bool forward, ShaderEvents condition);
   void runTo(uint32_t runToInstruction, bool forward, ShaderEvents condition = ShaderEvents::NoEvent);
 
-  void runToResourceAccess(bool forward, VarType type, const ShaderBindIndex &resource);
+  void runToResourceAccess(bool forward, VarType type, const ResourceReference &resRef);
 
   void applyBackwardsChange();
   void applyForwardsChange();
@@ -436,9 +456,11 @@ private:
 
   QString getRegNames(const RDTreeWidgetItem *item, uint32_t swizzle, uint32_t child = ~0U);
   const RDTreeWidgetItem *evaluateVar(const RDTreeWidgetItem *item, uint32_t swizzle,
-                                      ShaderVariable *var);
+                                      ShaderVariable *var, SourceVariableMapping *mapping);
   const RDTreeWidgetItem *getVarFromPath(const rdcstr &path, const RDTreeWidgetItem *root,
-                                         ShaderVariable *var, uint32_t *swizzle);
+                                         ShaderVariable *var, uint32_t *swizzle,
+                                         SourceVariableMapping *mapping);
   const RDTreeWidgetItem *getVarFromPath(const rdcstr &path, ShaderVariable *var = NULL,
-                                         uint32_t *swizzle = NULL);
+                                         uint32_t *swizzle = NULL,
+                                         SourceVariableMapping *mapping = NULL);
 };

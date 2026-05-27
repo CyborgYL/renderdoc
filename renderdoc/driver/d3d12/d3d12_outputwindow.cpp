@@ -1,7 +1,7 @@
 /******************************************************************************
  * The MIT License (MIT)
  *
- * Copyright (c) 2019-2024 Baldur Karlsson
+ * Copyright (c) 2018-2026 Baldur Karlsson
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -375,30 +375,6 @@ void D3D12Replay::GetOutputWindowDimensions(uint64_t id, int32_t &w, int32_t &h)
 
   w = m_OutputWindows[id].width;
   h = m_OutputWindows[id].height;
-}
-
-void D3D12Replay::SetOutputWindowDimensions(uint64_t id, int32_t w, int32_t h)
-{
-  if(id == 0 || m_OutputWindows.find(id) == m_OutputWindows.end())
-    return;
-
-  OutputWindow &outw = m_OutputWindows[id];
-
-  // can't resize an output with an actual window backing
-  if(outw.wnd)
-    return;
-
-  m_pDevice->ExecuteLists();
-  m_pDevice->FlushLists(true);
-
-  outw.width = w;
-  outw.height = h;
-
-  outw.MakeRTV(false);
-  if(outw.depth)
-    outw.MakeDSV();
-
-  outw.bbIdx = 0;
 }
 
 void D3D12Replay::GetOutputWindowData(uint64_t id, bytebuf &retData)

@@ -1,7 +1,7 @@
 /******************************************************************************
  * The MIT License (MIT)
  *
- * Copyright (c) 2019-2024 Baldur Karlsson
+ * Copyright (c) 2018-2026 Baldur Karlsson
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -73,6 +73,12 @@ struct D3D12QuadOverdrawCallback : public D3D12ActionCallback
     D3D12RenderState &rs = m_pDevice->GetQueue()->GetCommandData()->GetCurRenderState();
     m_PrevState = rs;
 
+    D3D12CommandData *cmdData = m_pDevice->GetQueue()->GetCommandData();
+    ID3D12CommandSignature *comSig = NULL;
+    if(cmdData)
+      comSig = cmdData->m_IndirectData.commandSig;
+    m_PrevComSig = comSig;
+
     // check cache first
     CachedPipeline cache = m_PipelineCache[rs.pipe];
 
@@ -82,8 +88,7 @@ struct D3D12QuadOverdrawCallback : public D3D12ActionCallback
       HRESULT hr = S_OK;
 
       WrappedID3D12RootSignature *sig =
-          m_pDevice->GetResourceManager()->GetCurrentAs<WrappedID3D12RootSignature>(
-              rs.graphics.rootsig);
+          m_pDevice->GetResourceManager()->GetResAs<WrappedID3D12RootSignature>(rs.graphics.rootsig);
 
       // need to be able to add a descriptor table with our UAV without hitting the 64 DWORD limit
       RDCASSERT(sig->sig.dwordLength < 64);
@@ -124,7 +129,7 @@ struct D3D12QuadOverdrawCallback : public D3D12ActionCallback
       RDCASSERTEQUAL(hr, S_OK);
 
       WrappedID3D12PipelineState *origPSO =
-          m_pDevice->GetResourceManager()->GetCurrentAs<WrappedID3D12PipelineState>(rs.pipe);
+          m_pDevice->GetResourceManager()->GetResAs<WrappedID3D12PipelineState>(rs.pipe);
 
       RDCASSERT(origPSO->IsGraphics());
 
@@ -166,10 +171,31 @@ struct D3D12QuadOverdrawCallback : public D3D12ActionCallback
         return;
       }
 
-      pipeDesc.pRootSignature = cache.sig;
+      pipeDesc.SetRootSig(cache.sig);
 
       hr = m_pDevice->CreatePipeState(pipeDesc, &cache.pipe);
       RDCASSERTEQUAL(hr, S_OK);
+
+      if(comSig)
+      {
+        // Need to create a new command signature using our modified root signature if the command
+        // signature modifies the root arguments i.e. setting root constants, updating bindings.
+        if(DoesCommandSignatureModifyRootArgs(comSig))
+        {
+          WrappedID3D12CommandSignature *rdComSig = (WrappedID3D12CommandSignature *)comSig;
+          D3D12_COMMAND_SIGNATURE_DESC comSigDesc;
+          comSigDesc.ByteStride = rdComSig->sig.ByteStride;
+          comSigDesc.NodeMask = 0;
+          comSigDesc.NumArgumentDescs = (uint32_t)rdComSig->sig.arguments.size();
+          comSigDesc.pArgumentDescs = rdComSig->sig.arguments.data();
+
+          m_pDevice->CreateCommandSignature(
+              &comSigDesc, cache.sig, __uuidof(ID3D12CommandSignature), (void **)&cache.comSig);
+
+          RDCASSERT(cache.comSig);
+          comSig = cache.comSig;
+        }
+      }
 
       m_PipelineCache[rs.pipe] = cache;
     }
@@ -200,13 +226,17 @@ struct D3D12QuadOverdrawCallback : public D3D12ActionCallback
                                                        Unwrap(m_MSDepth));
     }
 
-    AddDebugDescriptorsToRenderState(m_pDevice, rs, {m_UAV}, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
-                                     cache.sigElem, m_CopiedHeaps);
+    AddDebugDescriptorsToRenderState(m_pDevice, rs, false, {m_UAV},
+                                     D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, cache.sigElem,
+                                     m_CopiedHeaps);
 
     // as we're changing the root signature, we need to reapply all elements,
     // so just apply all state
     if(cmd)
       rs.ApplyState(m_pDevice, cmd);
+
+    if(cmdData)
+      cmdData->m_IndirectData.commandSig = comSig;
   }
 
   bool PostDraw(uint32_t eid, ID3D12GraphicsCommandListX *cmd)
@@ -235,6 +265,10 @@ struct D3D12QuadOverdrawCallback : public D3D12ActionCallback
 
     RDCASSERT(cmd);
     m_pDevice->GetQueue()->GetCommandData()->GetCurRenderState().ApplyState(m_pDevice, cmd);
+
+    D3D12CommandData *cmdData = m_pDevice->GetQueue()->GetCommandData();
+    if(cmdData)
+      cmdData->m_IndirectData.commandSig = m_PrevComSig;
 
     return true;
   }
@@ -270,10 +304,12 @@ struct D3D12QuadOverdrawCallback : public D3D12ActionCallback
     ID3D12RootSignature *sig;
     uint32_t sigElem;
     ID3D12PipelineState *pipe;
+    ID3D12CommandSignature *comSig;
   };
   std::map<ResourceId, CachedPipeline> m_PipelineCache;
   std::set<ResourceId> m_CopiedHeaps;
   D3D12RenderState m_PrevState;
+  ID3D12CommandSignature *m_PrevComSig;
 };
 
 static void SetRTVDesc(D3D12_RENDER_TARGET_VIEW_DESC &rtDesc, const D3D12_RESOURCE_DESC &texDesc,
@@ -349,10 +385,8 @@ void D3D12Replay::PatchQuadWritePS(D3D12_EXPANDED_PIPELINE_STATE_STREAM_DESC &pi
   if(pipeDesc.MS.BytecodeLength > 0)
     rastFeeding = &pipeDesc.MS;
 
-  uint32_t hash[4];
-  DXBC::DXBCContainer::GetHash(hash, rastFeeding->pShaderBytecode, rastFeeding->BytecodeLength);
-
-  rdcfixedarray<uint32_t, 4> key = hash;
+  rdcfixedarray<uint32_t, 4> key;
+  DXBC::DXBCContainer::GetHash(key, false, rastFeeding->pShaderBytecode, rastFeeding->BytecodeLength);
 
   bytebuf &patchedPs = m_PatchedPSCache[key];
 
@@ -962,7 +996,7 @@ ResourceId D3D12Replay::RenderOverlay(ResourceId texid, FloatVector clearCol, De
   if(dsView.GetResResourceId() != ResourceId())
   {
     ID3D12Resource *realDepth =
-        m_pDevice->GetResourceManager()->GetCurrentAs<ID3D12Resource>(dsView.GetResResourceId());
+        m_pDevice->GetResourceManager()->GetResAs<ID3D12Resource>(dsView.GetResResourceId());
 
     dsViewDesc = dsView.GetDSV();
 
@@ -1044,7 +1078,7 @@ ResourceId D3D12Replay::RenderOverlay(ResourceId texid, FloatVector clearCol, De
   WrappedID3D12PipelineState *pipe = NULL;
 
   if(rs.pipe != ResourceId())
-    pipe = m_pDevice->GetResourceManager()->GetCurrentAs<WrappedID3D12PipelineState>(rs.pipe);
+    pipe = m_pDevice->GetResourceManager()->GetResAs<WrappedID3D12PipelineState>(rs.pipe);
 
   if(overlay == DebugOverlay::NaN || overlay == DebugOverlay::Clipping)
   {
@@ -1118,6 +1152,7 @@ ResourceId D3D12Replay::RenderOverlay(ResourceId texid, FloatVector clearCol, De
 
       D3D12RenderState prev = rs;
 
+      rs.predication = {};
       rs.pipe = GetResID(pso);
       rs.rts.resize(1);
       rs.rts[0] = *GetWrapped(rtv);
@@ -1279,6 +1314,7 @@ ResourceId D3D12Replay::RenderOverlay(ResourceId texid, FloatVector clearCol, De
       psoDesc.SampleDesc.Count = RDCMAX(1U, psoDesc.SampleDesc.Count);
       psoDesc.DSVFormat = DXGI_FORMAT_UNKNOWN;
 
+      psoDesc.RasterizerState.ConservativeRaster = D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF;
       psoDesc.RasterizerState.FillMode = D3D12_FILL_MODE_WIREFRAME;
       psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
       psoDesc.RasterizerState.FrontCounterClockwise = FALSE;
@@ -1355,6 +1391,8 @@ ResourceId D3D12Replay::RenderOverlay(ResourceId texid, FloatVector clearCol, De
       if(!list)
         return ResourceId();
 
+      Unwrap(list)->SetPredication(NULL, 0, D3D12_PREDICATION_OP_EQUAL_ZERO);
+
       for(size_t i = 0; i < rts.size(); i++)
       {
         const D3D12Descriptor &desc = rts[i];
@@ -1368,7 +1406,7 @@ ResourceId D3D12Replay::RenderOverlay(ResourceId texid, FloatVector clearCol, De
       if(rs.dsv.GetResResourceId() != ResourceId() && IsDepthFormat(resourceDesc.Format))
       {
         WrappedID3D12PipelineState *origPSO =
-            m_pDevice->GetResourceManager()->GetCurrentAs<WrappedID3D12PipelineState>(rs.pipe);
+            m_pDevice->GetResourceManager()->GetResAs<WrappedID3D12PipelineState>(rs.pipe);
         if(origPSO && origPSO->IsGraphics())
         {
           D3D12_COMPARISON_FUNC depthFunc = origPSO->graphics->DepthStencilState.DepthFunc;
@@ -1503,6 +1541,7 @@ ResourceId D3D12Replay::RenderOverlay(ResourceId texid, FloatVector clearCol, De
       rs.ApplyState(m_pDevice, list);
 
       list->OMSetRenderTargets(1, &rtv, TRUE, NULL);
+      list->SetPredication(NULL, 0, D3D12_PREDICATION_OP_EQUAL_ZERO);
 
       D3D12_VIEWPORT viewport = rs.views[0];
       list->RSSetViewports(1, &viewport);
@@ -1516,7 +1555,7 @@ ResourceId D3D12Replay::RenderOverlay(ResourceId texid, FloatVector clearCol, De
 
       list->SetGraphicsRootSignature(m_General.CheckerboardRootSig);
 
-      CheckerboardCBuffer pixelData = {0};
+      CheckerboardCBuffer pixelData = {};
 
       pixelData.BorderWidth = 3;
       pixelData.CheckerSquareDimension = 16.0f;
@@ -1614,11 +1653,11 @@ ResourceId D3D12Replay::RenderOverlay(ResourceId texid, FloatVector clearCol, De
         m_pDevice->ReplayLog(0, events[0], eReplay_WithoutDraw);
       }
 
-      pipe = m_pDevice->GetResourceManager()->GetCurrentAs<WrappedID3D12PipelineState>(rs.pipe);
+      pipe = m_pDevice->GetResourceManager()->GetResAs<WrappedID3D12PipelineState>(rs.pipe);
 
       D3D12_EXPANDED_PIPELINE_STATE_STREAM_DESC pipeDesc;
       pipe->Fill(pipeDesc);
-      pipeDesc.pRootSignature = GetDebugManager()->GetMeshRootSig();
+      pipeDesc.SetRootSig(GetDebugManager()->GetMeshRootSig());
       pipeDesc.SampleMask = 0xFFFFFFFF;
       pipeDesc.SampleDesc = overlayTexDesc.SampleDesc;
       pipeDesc.IBStripCutValue = D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED;
@@ -1684,7 +1723,7 @@ ResourceId D3D12Replay::RenderOverlay(ResourceId texid, FloatVector clearCol, De
         Vec4f viewport;
 
         if(!rs.views.empty())
-          viewport = Vec4f(rs.views[0].Width, rs.views[0].Height);
+          viewport = Vec4f(rs.views[0].Width, rs.views[0].Height, 0.0f, 0.0f);
 
         D3D12RenderState::SignatureElement viewportElem(eRootCBV, ResourceId(), 0);
         WrappedID3D12Resource::GetResIDFromAddr(
@@ -1744,7 +1783,7 @@ ResourceId D3D12Replay::RenderOverlay(ResourceId texid, FloatVector clearCol, De
             }
 
             ID3D12Resource *vb =
-                m_pDevice->GetResourceManager()->GetCurrentAs<ID3D12Resource>(fmt.vertexResourceId);
+                m_pDevice->GetResourceManager()->GetResAs<ID3D12Resource>(fmt.vertexResourceId);
 
             D3D12_VERTEX_BUFFER_VIEW vbView = {};
             vbView.BufferLocation = vb->GetGPUVirtualAddress() + fmt.vertexByteOffset;
@@ -1761,7 +1800,7 @@ ResourceId D3D12Replay::RenderOverlay(ResourceId texid, FloatVector clearCol, De
             if(fmt.indexByteStride && fmt.indexResourceId != ResourceId())
             {
               ID3D12Resource *ib =
-                  m_pDevice->GetResourceManager()->GetCurrentAs<ID3D12Resource>(fmt.indexResourceId);
+                  m_pDevice->GetResourceManager()->GetResAs<ID3D12Resource>(fmt.indexResourceId);
 
               D3D12_INDEX_BUFFER_VIEW view;
               view.BufferLocation = ib->GetGPUVirtualAddress() + fmt.indexByteOffset;
@@ -1883,7 +1922,7 @@ ResourceId D3D12Replay::RenderOverlay(ResourceId texid, FloatVector clearCol, De
 
       ResourceId res = rs.GetDSVID();
 
-      ID3D12Resource *curDepth = m_pDevice->GetResourceManager()->GetCurrentAs<ID3D12Resource>(res);
+      ID3D12Resource *curDepth = m_pDevice->GetResourceManager()->GetResAs<ID3D12Resource>(res);
       D3D12_RESOURCE_DESC curDepthDesc = curDepth ? curDepth->GetDesc() : D3D12_RESOURCE_DESC();
       if(curDepthDesc.SampleDesc.Count > 1)
       {
@@ -1970,6 +2009,7 @@ ResourceId D3D12Replay::RenderOverlay(ResourceId texid, FloatVector clearCol, De
       {
         SAFE_RELEASE(it->second.pipe);
         SAFE_RELEASE(it->second.sig);
+        SAFE_RELEASE(it->second.comSig);
       }
 
       SAFE_RELEASE(overdrawTex);
@@ -1992,8 +2032,8 @@ ResourceId D3D12Replay::RenderOverlay(ResourceId texid, FloatVector clearCol, De
         WrappedID3D12PipelineState::ShaderEntry *wrappedPS = pipe->PS();
         if(wrappedPS)
         {
-          ShaderReflection &reflection = pipe->PS()->GetDetails();
-          for(SigParameter &output : reflection.outputSignature)
+          const ShaderReflection &reflection = pipe->PS()->GetDetails();
+          for(const SigParameter &output : reflection.outputSignature)
           {
             if(output.systemValue == ShaderBuiltin::DepthOutput)
               useDepthWriteStencilPass = true;
@@ -2210,6 +2250,12 @@ ResourceId D3D12Replay::RenderOverlay(ResourceId texid, FloatVector clearCol, De
           psoDesc.DepthStencilState.DepthBoundsTestEnable = FALSE;
         }
       }
+
+      if(dsViewDesc.Flags & D3D12_DSV_FLAG_READ_ONLY_DEPTH)
+        psoDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+      if(dsViewDesc.Flags & D3D12_DSV_FLAG_READ_ONLY_STENCIL)
+        psoDesc.DepthStencilState.FrontFace.StencilWriteMask =
+            psoDesc.DepthStencilState.BackFace.StencilWriteMask = 0;
 
       RDCEraseEl(psoDesc.RTVFormats.RTFormats);
       psoDesc.RTVFormats.RTFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;

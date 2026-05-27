@@ -1,7 +1,7 @@
 /******************************************************************************
  * The MIT License (MIT)
  *
- * Copyright (c) 2019-2024 Baldur Karlsson
+ * Copyright (c) 2017-2026 Baldur Karlsson
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -178,9 +178,12 @@ public:
   using QTreeView::expandAll;
   using QTreeView::collapseAll;
 
+  using QTreeView::sizeHintForColumn;
+
 signals:
   void leave(QEvent *e);
   void keyPress(QKeyEvent *e);
+  void customContextMenu(QModelIndex index, QMenu *menu);
 
 protected:
   void mouseMoveEvent(QMouseEvent *e) override;

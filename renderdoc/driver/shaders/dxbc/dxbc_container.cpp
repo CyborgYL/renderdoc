@@ -1,7 +1,7 @@
 /******************************************************************************
  * The MIT License (MIT)
  *
- * Copyright (c) 2019-2024 Baldur Karlsson
+ * Copyright (c) 2015-2026 Baldur Karlsson
  * Copyright (c) 2014 Crytek
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -25,12 +25,14 @@
 
 #include "dxbc_container.h"
 #include <algorithm>
+#include <unordered_map>
 #include "api/app/renderdoc_app.h"
 #include "common/common.h"
 #include "core/settings.h"
 #include "driver/shaders/dxil/dxil_bytecode.h"
 #include "lz4/lz4.h"
 #include "md5/md5.h"
+#include "miniz/miniz.h"
 #include "replay/replay_driver.h"
 #include "serialise/serialiser.h"
 #include "dxbc_bytecode.h"
@@ -39,9 +41,174 @@
 
 // this is extern so that it can be shared with vulkan
 RDOC_EXTERN_CONFIG(rdcarray<rdcstr>, DXBC_Debug_SearchDirPaths);
+RDOC_EXTERN_CONFIG(rdcarray<rdcstr>, Replay_Shader_LimitedSearchDirPaths);
+
+namespace
+{
+
+// lookup from plain filename -> absolute path of first result in search paths
+std::unordered_map<rdcstr, rdcstr> cachedDebugFilesLookup;
+Threading::CriticalSection cachedDebugFilesLookupLock;
+
+void CacheSearchDirDebugPaths(rdcstr dir)
+{
+  rdcarray<PathEntry> entries;
+  FileIO::GetFilesInDirectory(dir, entries);
+
+  for(const PathEntry &e : entries)
+  {
+    if(e.flags & PathProperty::Directory)
+    {
+      CacheSearchDirDebugPaths(dir + "/" + e.filename);
+    }
+    else if(e.flags & PathProperty::ErrorAccessDenied)
+    {
+      RDCWARN("Access denied: %s", dir.c_str());
+    }
+    else if(e.flags & PathProperty::ErrorInvalidPath)
+    {
+      RDCWARN("Invalid path: %s", dir.c_str());
+    }
+    else if(e.flags & PathProperty::ErrorUnknown)
+    {
+      RDCWARN("Couldn't enumerate under %s - bad path or permission issue", dir.c_str());
+    }
+    else
+    {
+      // in case of abiguity if the same filename is found in multiple places, we pick the first match.
+      // We have not reverse engineered how PIX chooses one, and of course it is not documented
+      if(cachedDebugFilesLookup[e.filename] == "")
+        cachedDebugFilesLookup[e.filename] = dir + "/" + e.filename;
+    }
+  }
+}
+
+void CacheSearchDirDebugPaths()
+{
+  if(!RenderDoc::Inst().IsReplayApp())
+    return;
+
+  SCOPED_LOCK(cachedDebugFilesLookupLock);
+
+  if(!cachedDebugFilesLookup.empty())
+    return;
+
+  rdcarray<rdcstr> searchPaths = DXBC_Debug_SearchDirPaths();
+  rdcarray<rdcstr> limitedSearchPaths = Replay_Shader_LimitedSearchDirPaths();
+
+  for(const rdcstr &base : searchPaths)
+  {
+    if(limitedSearchPaths.contains(base))
+    {
+      RDCLOG("Not recursing to enumerate files under %s", base.c_str());
+      continue;
+    }
+
+    size_t sz = cachedDebugFilesLookup.size();
+    CacheSearchDirDebugPaths(base);
+    RDCLOG("Recursively enumerated all files under %s, found %zu files", base.c_str(),
+           cachedDebugFilesLookup.size() - sz);
+  }
+
+  RDCLOG("Cached %zu debug files in %zu search paths", cachedDebugFilesLookup.size(),
+         searchPaths.size());
+}
+
+struct DebugFile
+{
+  bool pdb = false;
+  rdcstr path;
+  bytebuf contents;
+
+  bool empty() { return path.empty(); }
+
+  void ReadAndProcess(bool lz4, const rdcfixedarray<uint32_t, 4> &desiredHash, rdcstr &log)
+  {
+    FileIO::ReadAll(path, contents);
+    Process(lz4, desiredHash, log);
+  }
+  void Process(bool lz4, const rdcfixedarray<uint32_t, 4> &desiredHash, rdcstr &log)
+  {
+    if(lz4)
+    {
+      bytebuf decompressed;
+
+      // first try decompressing to 1MB flat
+      decompressed.resize(1024 * 1024);
+
+      int ret = LZ4_decompress_safe((const char *)contents.data(), (char *)decompressed.data(),
+                                    contents.count(), decompressed.count());
+
+      if(ret < 0)
+      {
+        // if it failed, either source is corrupt or we didn't allocate enough space.
+        // Just allocate 255x compressed size since it can't need any more than that.
+        decompressed.resize(255 * contents.size());
+
+        ret = LZ4_decompress_safe((const char *)contents.data(), (char *)decompressed.data(),
+                                  contents.count(), decompressed.count());
+
+        if(ret < 0)
+        {
+          RDCERR("Failed to decompress LZ4 data from %s", path.c_str());
+          log += StringFormat::Fmt("\nFailed to decompress LZ4 data from '%s'\n", path.c_str());
+          return;
+        }
+      }
+
+      RDCDEBUG("lz4 decompressed %s", path.c_str());
+
+      RDCASSERT(ret > 0, ret);
+
+      // we resize and memcpy instead of just doing .swap() because that would
+      // transfer over the over-large pessimistic capacity needed for decompression
+      contents.resize(ret);
+      memcpy(contents.data(), decompressed.data(), contents.size());
+    }
+
+    if(DXBC::IsPDBFile(&contents[0], contents.size()))
+    {
+      size_t oldSize = contents.size();
+      DXBC::UnwrapEmbeddedPDBData(contents);
+      if(oldSize != contents.size())
+        RDCDEBUG("PDB unwrapped %s", path.c_str());
+      pdb = true;
+    }
+
+    // if we have a desired hash, check it now
+    if(desiredHash[0] != 0 || desiredHash[1] != 0 || desiredHash[2] != 0 || desiredHash[3] != 0)
+    {
+      rdcfixedarray<uint32_t, 4> debugDataHash;
+      DXBC::DXBCContainer::GetHash(debugDataHash, true, contents.data(), contents.size());
+
+      if(debugDataHash != desiredHash)
+      {
+        RDCWARN("Debug info file at %s does not match hash from shader, ignoring", path.c_str());
+        log += StringFormat::Fmt(
+            "Ignoring debug info file '%s' hash 0x08%X08%X08%X08%X does not match shader hash "
+            "0x08%X08%X08%X08%X",
+            path.c_str(), debugDataHash[0], debugDataHash[1], debugDataHash[2], debugDataHash[3],
+            desiredHash[0], desiredHash[1], desiredHash[2], desiredHash[3]);
+
+        // invalidate ourselves
+        path.clear();
+        contents.clear();
+      }
+    }
+  }
+};
+
+};
 
 namespace DXBC
 {
+void ResetSearchDirsCache()
+{
+  SCOPED_LOCK(cachedDebugFilesLookupLock);
+
+  cachedDebugFilesLookup.clear();
+}
+
 rdcstr BasicDemangle(const rdcstr &possiblyMangledName)
 {
   if(possiblyMangledName.size() > 2 && possiblyMangledName[0] == '\x1' &&
@@ -331,6 +498,38 @@ ShaderStage GetShaderStage(ShaderType type)
   }
 }
 
+// DXIL wonderfully provides us with offsets that are completely useless/pointless for structured
+// buffers. We need to recalculate them now based on tight packing
+void RecalculateScalarOffsetsSizes(CBufferVariableType &type)
+{
+  uint32_t offset = 0;
+  uint32_t pendingOffsetIncr = 0;
+  uint32_t lastBitfieldOffset = 0;
+  for(DXBC::CBufferVariable &var : type.members)
+  {
+    // if we encounter a non-bitfield, or the offset goes backwards, apply the 'real' offset now
+    if(var.bitFieldSize == 0 || var.bitFieldOffset < lastBitfieldOffset)
+    {
+      offset += pendingOffsetIncr;
+      pendingOffsetIncr = 0;
+    }
+
+    var.offset = offset;
+
+    // all bitfields share the same offset, which will be incremented at the next bitfield boundary (above)
+    if(var.bitFieldSize > 0)
+    {
+      pendingOffsetIncr = var.type.bytesize;
+      lastBitfieldOffset = var.bitFieldOffset + var.bitFieldSize;
+      continue;
+    }
+
+    offset += var.type.rows * var.type.cols * VarTypeByteSize(var.type.varType) * var.type.elements;
+
+    RecalculateScalarOffsetsSizes(var.type);
+  }
+}
+
 rdcstr TypeName(CBufferVariableType desc)
 {
   rdcstr ret;
@@ -490,7 +689,7 @@ CBufferVariableType DXBCContainer::ParseRDEFType(const RDEFHeader *h, const byte
   return ret;
 }
 
-D3D_PRIMITIVE_TOPOLOGY DXBCContainer::GetOutputTopology()
+void DXBCContainer::CacheOutputTopology()
 {
   if(m_OutputTopology == D3D_PRIMITIVE_TOPOLOGY_UNDEFINED)
   {
@@ -501,8 +700,6 @@ D3D_PRIMITIVE_TOPOLOGY DXBCContainer::GetOutputTopology()
     else if(m_DXILByteCode)
       m_OutputTopology = m_DXILByteCode->GetOutputTopology();
   }
-
-  return m_OutputTopology;
 }
 
 D3D_PRIMITIVE_TOPOLOGY DXBCContainer::GetOutputTopology(const void *ByteCode, size_t ByteCodeLength)
@@ -595,6 +792,35 @@ const rdcstr &DXBCContainer::GetDisassembly(bool dxcStyle)
         globalFlagsString += commentString + "       Raytracing tier 1.1 features\n";
       if(m_GlobalFlags & GlobalShaderFlags::SamplerFeedback)
         globalFlagsString += commentString + "       Sampler feedback\n";
+      if(m_GlobalFlags & GlobalShaderFlags::AtomicInt64OnTypedResource)
+        globalFlagsString += commentString + "       64-bit Atomics on Typed Resources\n";
+      if(m_GlobalFlags & GlobalShaderFlags::AtomicInt64OnGroupShared)
+        globalFlagsString += commentString + "       64-bit Atomics on Group Shared\n";
+      if(m_GlobalFlags & GlobalShaderFlags::DerivativesInMeshAndAmpShaders)
+        globalFlagsString +=
+            commentString + "       Derivatives in mesh and amplification shaders\n";
+      if(m_GlobalFlags & GlobalShaderFlags::ResourceDescriptorHeapIndexing)
+        globalFlagsString += commentString + "       Resource descriptor heap indexing\n";
+      if(m_GlobalFlags & GlobalShaderFlags::SamplerDescriptorHeapIndexing)
+        globalFlagsString += commentString + "       Sampler descriptor heap indexing\n";
+      if(m_GlobalFlags & GlobalShaderFlags::WaveMatrix)
+        globalFlagsString += commentString + "       Wave Matrix\n";
+      if(m_GlobalFlags & GlobalShaderFlags::AtomicInt64OnHeapResource)
+        globalFlagsString += commentString + "       64-bit Atomics on Heap Resources\n";
+      if(m_GlobalFlags & GlobalShaderFlags::AdvancedTextureOps)
+        globalFlagsString += commentString + "       Advanced Texture Ops\n";
+      if(m_GlobalFlags & GlobalShaderFlags::WriteableMSAATextures)
+        globalFlagsString += commentString + "       Writeable MSAA Textures\n";
+      if(m_GlobalFlags & GlobalShaderFlags::SampleCmpGradientOrBias)
+        globalFlagsString += commentString + "       SampleCmp with gradient or bias\n";
+      if(m_GlobalFlags & GlobalShaderFlags::ShaderFeatureInfo_ExtendedCommandInfo)
+        globalFlagsString += commentString + "       Extended command info\n";
+      if(m_GlobalFlags & ~GlobalShaderFlags::KNOWN_FLAGS_MASK)
+        globalFlagsString +=
+            commentString + StringFormat::Fmt("       Unknown shader flags 0x%X\n",
+                                              (uint64_t)m_GlobalFlags -
+                                                  ((uint64_t)m_GlobalFlags &
+                                                   (uint64_t)GlobalShaderFlags::KNOWN_FLAGS_MASK));
       globalFlagsString += commentString + "\n";
     }
 
@@ -613,6 +839,7 @@ const rdcstr &DXBCContainer::GetDisassembly(bool dxcStyle)
         m_Disassembly += "// Vendor shader extensions in use\n";
 
       m_Disassembly += m_DXBCByteCode->GetDisassembly();
+      m_Threadscope = m_DXBCByteCode->GetThreadScope();
     }
     else if(m_DXILByteCode)
     {
@@ -636,7 +863,14 @@ const rdcstr &DXBCContainer::GetDisassembly(bool dxcStyle)
 #endif
 
       m_Disassembly += m_DXILByteCode->GetDisassembly(dxcStyle, m_Reflection);
+      m_Threadscope = m_DXILByteCode->GetThreadScope();
     }
+
+    if(m_Type == DXBC::ShaderType::Pixel)
+      m_Threadscope |= ThreadScope::Quad;
+
+    if(m_GlobalFlags & GlobalShaderFlags::WaveOps)
+      m_Threadscope |= ThreadScope::Subgroup;
   }
 
   return m_Disassembly;
@@ -655,7 +889,16 @@ void DXBCContainer::FillTraceLineInfo(ShaderDebugTrace &trace) const
     extraLines++;
 
   if(m_GlobalFlags != GlobalShaderFlags::None)
-    extraLines += (uint32_t)Bits::CountOnes((uint32_t)m_GlobalFlags) + 2;
+  {
+    extraLines += 2;
+    uint64_t knownFlags = (uint64_t)m_GlobalFlags & (uint64_t)GlobalShaderFlags::KNOWN_FLAGS_MASK;
+    uint32_t upperBits = knownFlags >> 32;
+    uint32_t lowerBits = knownFlags & 0xFFFFFFFF;
+    extraLines += (uint32_t)Bits::CountOnes(upperBits);
+    extraLines += (uint32_t)Bits::CountOnes(lowerBits);
+    if(m_GlobalFlags & ~GlobalShaderFlags::KNOWN_FLAGS_MASK)
+      extraLines += 1;
+  }
 
   if(m_DXBCByteCode)
   {
@@ -864,11 +1107,12 @@ const byte *DXBCContainer::FindChunk(const bytebuf &ByteCode, uint32_t fourcc, s
   return FindChunk(ByteCode.data(), ByteCode.size(), fourcc, size);
 }
 
-void DXBCContainer::GetHash(uint32_t hash[4], const void *ByteCode, size_t BytecodeLength)
+void DXBCContainer::GetHash(rdcfixedarray<uint32_t, 4> &hash, bool debugHashOnly,
+                            const void *ByteCode, size_t BytecodeLength)
 {
   if(BytecodeLength < sizeof(FileHeader) || ByteCode == NULL)
   {
-    memset(hash, 0, sizeof(uint32_t) * 4);
+    hash.clear();
     return;
   }
 
@@ -876,7 +1120,7 @@ void DXBCContainer::GetHash(uint32_t hash[4], const void *ByteCode, size_t Bytec
 
   FileHeader *header = (FileHeader *)ByteCode;
 
-  memset(hash, 0, sizeof(uint32_t) * 4);
+  hash.clear();
 
   if(header->fourcc != FOURCC_DXBC)
     return;
@@ -884,7 +1128,8 @@ void DXBCContainer::GetHash(uint32_t hash[4], const void *ByteCode, size_t Bytec
   if(header->fileLength != (uint32_t)BytecodeLength)
     return;
 
-  memcpy(hash, header->hashValue, sizeof(header->hashValue));
+  if(!debugHashOnly)
+    hash = header->hashValue;
 
   uint32_t *chunkOffsets = (uint32_t *)(header + 1);    // right after the header
 
@@ -899,7 +1144,7 @@ void DXBCContainer::GetHash(uint32_t hash[4], const void *ByteCode, size_t Bytec
     {
       HASHHeader *hashHeader = (HASHHeader *)chunkContents;
 
-      memcpy(hash, hashHeader->hashValue, sizeof(hashHeader->hashValue));
+      hash = hashHeader->hashValue;
     }
   }
 }
@@ -1243,17 +1488,34 @@ rdcstr DXBCContainer::GetDebugBinaryPath(const void *ByteCode, size_t ByteCodeLe
 
 void DXBCContainer::TryFetchSeparateDebugInfo(bytebuf &byteCode, const rdcstr &debugInfoPath)
 {
+  rdcstr loadingLog;
   if(!CheckForDebugInfo((const void *)&byteCode[0], byteCode.size()))
   {
     rdcstr originalPath = debugInfoPath;
 
+    rdcfixedarray<uint32_t, 4> desiredHash;
+    GetHash(desiredHash, true, byteCode.data(), byteCode.size());
+
     if(originalPath.empty())
       originalPath = GetDebugBinaryPath((const void *)&byteCode[0], byteCode.size());
+
+    if(originalPath.empty() &&
+       (desiredHash[0] != 0 || desiredHash[1] != 0 || desiredHash[2] != 0 || desiredHash[3] != 0))
+    {
+      byte *h = (byte *)desiredHash.data();
+      for(uint32_t i = 0; i < desiredHash.byteSize(); i++)
+        originalPath += StringFormat::Fmt("%02x", h[i]);
+      originalPath += ".pdb";
+      loadingLog += StringFormat::Fmt("No shader PDB filename specified using default '%s'\n\n",
+                                      originalPath.c_str());
+      RDCDEBUG("No shader pdb filename specified - assuming default '%s'", originalPath.c_str());
+    }
 
     if(!originalPath.empty())
     {
       bool lz4 = false;
 
+      // RenderDoc extension to allow lz4 compression
       if(!strncmp(originalPath.c_str(), "lz4#", 4))
       {
         originalPath = originalPath.substr(4);
@@ -1261,116 +1523,232 @@ void DXBCContainer::TryFetchSeparateDebugInfo(bytebuf &byteCode, const rdcstr &d
       }
       // could support more if we're willing to compile in the decompressor
 
-      FILE *originalShaderFile = NULL;
-
       const rdcarray<rdcstr> &searchPaths = DXBC_Debug_SearchDirPaths();
 
       size_t numSearchPaths = searchPaths.size();
 
-      rdcstr foundPath;
+      const rdcarray<rdcstr> nonRecursiveSearchPaths = Replay_Shader_LimitedSearchDirPaths();
+      loadingLog += StringFormat::Fmt("Shader filepath '%s'\n", originalPath.c_str());
+      if(searchPaths.size() > nonRecursiveSearchPaths.size())
+      {
+        loadingLog += rdcstr("\nRecursive Search Path(s):\n");
+        for(const rdcstr &path : searchPaths)
+        {
+          if(nonRecursiveSearchPaths.contains(path))
+            continue;
+          loadingLog += StringFormat::Fmt("'%s'\n", path.c_str());
+        }
+      }
+      else
+      {
+        loadingLog += rdcstr("\nNo Recursive Search Paths\n");
+      }
+      if(!nonRecursiveSearchPaths.empty())
+      {
+        loadingLog += rdcstr("\nNon-Recursive Search Path(s):\n");
+        for(const rdcstr &path : nonRecursiveSearchPaths)
+          loadingLog += StringFormat::Fmt("'%s'\n", path.c_str());
+      }
+      else
+      {
+        loadingLog += rdcstr("\nNo Non-Recursive Search Paths\n");
+      }
 
+      DebugFile found;
+
+      rdcstr nickname = originalPath;
       // keep searching until we've exhausted all possible path options, or we've found a file that
-      // opens
-      while(originalShaderFile == NULL && !originalPath.empty())
+      // opens and (optionally if we have it matches the hash we're looking for)
+      rdcstr tempPath = originalPath;
+
+      // if the path specified does not end in a .pdb it seems like PIX appends that, so do this just
+      // to match. It's really fun matching behaviour in an application that is deliberately undocumented
+      bool hasSuffix = tempPath.endsWith(".pdb") || tempPath.endsWith(".PDB");
+
+      while(found.empty() && !tempPath.empty())
       {
         // while we haven't found a file, keep trying through the search paths. For i==0
         // check the path on its own, in case it's an absolute path.
-        for(size_t i = 0; originalShaderFile == NULL && i <= numSearchPaths; i++)
+        for(size_t i = 0; found.empty() && i <= numSearchPaths; i++)
         {
           if(i == 0)
           {
-            originalShaderFile = FileIO::fopen(originalPath, FileIO::ReadBinary);
-            foundPath = originalPath;
-            continue;
+            loadingLog += rdcstr("\n");
+            if(FileIO::exists(tempPath))
+              found.path = tempPath;
+            else if(!hasSuffix && FileIO::exists(tempPath + ".pdb"))
+              found.path = tempPath + ".pdb";
+
+            if(!found.empty())
+            {
+              RDCDEBUG("Found %s (matched using leaf %s) when looking for %s", found.path.c_str(),
+                       tempPath.c_str(), originalPath.c_str());
+
+              // this may empty out found, if the hash doesn't match
+              found.ReadAndProcess(lz4, desiredHash, loadingLog);
+              loadingLog += StringFormat::Fmt("File found using filepath '%s'\n", found.path.c_str());
+            }
+            else
+            {
+              loadingLog +=
+                  StringFormat::Fmt("File not found using filepath '%s'\n", tempPath.c_str());
+              if(!hasSuffix)
+                loadingLog +=
+                    StringFormat::Fmt("File not found using filepath '%s.pdb'\n", tempPath.c_str());
+            }
           }
           else
           {
             const rdcstr &searchPath = searchPaths[i - 1];
-            foundPath = searchPath + "/" + originalPath;
-            originalShaderFile = FileIO::fopen(foundPath, FileIO::ReadBinary);
+
+            rdcstr checkPath = searchPath + "/" + tempPath;
+
+            if(FileIO::exists(checkPath))
+              found.path = checkPath;
+            else if(!hasSuffix && FileIO::exists(checkPath + ".pdb"))
+              found.path = checkPath + ".pdb";
+
+            if(!found.empty())
+            {
+              RDCDEBUG("Found %s (matched using leaf %s) when looking for %s", found.path.c_str(),
+                       tempPath.c_str(), originalPath.c_str());
+
+              // this may empty out found, if the hash doesn't match
+              found.ReadAndProcess(lz4, desiredHash, loadingLog);
+              loadingLog += StringFormat::Fmt(
+                  "File found in search directory using filepath '%s'\n", found.path.c_str());
+            }
+            else
+            {
+              loadingLog += StringFormat::Fmt(
+                  "File not found in search directory using filepath '%s'\n", checkPath.c_str());
+              if(!hasSuffix)
+                loadingLog += StringFormat::Fmt(
+                    "File not found in search directory using filepath '%s.pdb'\n",
+                    checkPath.c_str());
+            }
           }
         }
 
-        if(originalShaderFile == NULL)
+        if(found.empty())
         {
           // the "documented" behaviour for D3D debug info names is that when presented with a
           // relative path containing subfolders like foo/bar/blah.pdb then we should first try to
           // append it to all search paths as-is, then strip off the top-level subdirectory to get
           // bar/blah.pdb and try that in all search directories, and keep going. So if we got here
           // and didn't open a file, try to strip off the the top directory and continue.
-          int32_t offs = originalPath.find_first_of("\\/");
+          int32_t offs = tempPath.find_first_of("\\/");
 
           // if we couldn't find a directory separator there's nothing to do, stop looking
           if(offs == -1)
             break;
 
           // otherwise strip up to there and keep going
-          originalPath.erase(0, offs + 1);
+          tempPath.erase(0, offs + 1);
         }
       }
 
-      if(originalShaderFile == NULL)
-        return;
-
-      FileIO::fseek64(originalShaderFile, 0L, SEEK_END);
-      uint64_t originalShaderSize = FileIO::ftell64(originalShaderFile);
-      FileIO::fseek64(originalShaderFile, 0, SEEK_SET);
-
-      if(lz4 || originalShaderSize >= byteCode.size())
+      // the "undocumented" behaviour for PIX is to recursively search in search paths subfolders
+      // for the file. Since it's unclear exactly how this interacts with search priorities and
+      // subfolders, we only do this if the path is a single filename with no subfolders, and we
+      // assume the filename is unique so pick the first match. To reduce disk churn O(N^2) style we
+      // cache the recursive contents of the search folders. This will be cleared by the replay code
+      // on each replay.
+      if(found.empty() && !originalPath.contains('/') && !originalPath.contains('\\'))
       {
-        bytebuf debugBytecode;
+        loadingLog += rdcstr("\n");
+        CacheSearchDirDebugPaths();
 
-        debugBytecode.resize((size_t)originalShaderSize);
-        FileIO::fread(&debugBytecode[0], sizeof(byte), (size_t)originalShaderSize,
-                      originalShaderFile);
-
-        if(lz4)
+        auto it = cachedDebugFilesLookup.find(originalPath);
+        if(it == cachedDebugFilesLookup.end() && !hasSuffix)
+          it = cachedDebugFilesLookup.find(originalPath + ".pdb");
+        if(it != cachedDebugFilesLookup.end())
         {
-          rdcarray<byte> decompressed;
+          found.path = it->second;
+          RDCDEBUG("Found %s recursively as %s", originalPath.c_str(), found.path.c_str());
 
-          // first try decompressing to 1MB flat
-          decompressed.resize(100 * 1024);
-
-          int ret = LZ4_decompress_safe((const char *)&debugBytecode[0], (char *)&decompressed[0],
-                                        (int)debugBytecode.size(), (int)decompressed.size());
-
-          if(ret < 0)
-          {
-            // if it failed, either source is corrupt or we didn't allocate enough space.
-            // Just allocate 255x compressed size since it can't need any more than that.
-            decompressed.resize(255 * debugBytecode.size());
-
-            ret = LZ4_decompress_safe((const char *)&debugBytecode[0], (char *)&decompressed[0],
-                                      (int)debugBytecode.size(), (int)decompressed.size());
-
-            if(ret < 0)
-            {
-              RDCERR("Failed to decompress LZ4 data from %s", foundPath.c_str());
-              return;
-            }
-          }
-
-          RDCASSERT(ret > 0, ret);
-
-          // we resize and memcpy instead of just doing .swap() because that would
-          // transfer over the over-large pessimistic capacity needed for decompression
-          debugBytecode.resize(ret);
-          memcpy(&debugBytecode[0], &decompressed[0], debugBytecode.size());
+          found.ReadAndProcess(lz4, desiredHash, loadingLog);
+          loadingLog += StringFormat::Fmt(
+              "File found in recursive directory search using filepath '%s'\n", found.path.c_str());
         }
-
-        if(IsPDBFile(&debugBytecode[0], debugBytecode.size()))
+        else
         {
-          UnwrapEmbeddedPDBData(debugBytecode);
-          m_DebugShaderBlob = debugBytecode;
+          loadingLog += StringFormat::Fmt(
+              "File not found in recursive directory search using filepath '%s'\n",
+              originalPath.c_str());
+          if(!hasSuffix)
+            loadingLog += StringFormat::Fmt(
+                "File not found in recursive directory search using filepath '%s.pdb'\n",
+                originalPath.c_str());
         }
-        else if(CheckForDebugInfo((const void *)&debugBytecode[0], debugBytecode.size()))
+      }
+      else if(found.empty())
+      {
+        loadingLog += StringFormat::Fmt(
+            "\nNot performing a recursive directory search because filepath contains directory "
+            "information '%s'\n",
+            originalPath.c_str());
+      }
+
+      // Try to retrieve debug file from the externally referenced files in the capture
+      if(found.empty())
+      {
+        if(RenderDoc::Inst().GetTrackedFileData(nickname, found.contents))
         {
-          byteCode.swap(debugBytecode);
+          loadingLog += StringFormat::Fmt(
+              "\nFound debug data from files embedded in the capture using nickname '%s'\n",
+              nickname.c_str());
+          found.path = nickname;
+          found.Process(lz4, desiredHash, loadingLog);
+        }
+        else
+        {
+          loadingLog += StringFormat::Fmt(
+              "\nFile not found in files embedded in the capture using nickname '%s'\n",
+              nickname.c_str());
         }
       }
 
-      FileIO::fclose(originalShaderFile);
+      if(found.empty())
+      {
+        RDCDEBUG("Couldn't find pdb for %s", originalPath.c_str());
+        m_DebugInfoLoadingLog =
+            StringFormat::Fmt("Did not find debug data for '%s'\n\n", originalPath.c_str());
+        if(!loadingLog.empty())
+        {
+          m_DebugInfoLoadingLog += StringFormat::Fmt("Details\n");
+          m_DebugInfoLoadingLog += StringFormat::Fmt("-------\n\n");
+          m_DebugInfoLoadingLog += loadingLog;
+        }
+        return;
+      }
+
+      RenderDoc::Inst().AddTrackedFileReference(nickname, found.path);
+
+      if(found.pdb)
+      {
+        m_DebugShaderBlob = found.contents;
+      }
+      else if(CheckForDebugInfo(found.contents.data(), found.contents.size()))
+      {
+        if(m_InitialShaderBlob.isEmpty())
+          m_InitialShaderBlob = byteCode;
+        byteCode.swap(found.contents);
+      }
+      m_DebugInfoLoadingLog =
+          StringFormat::Fmt("Found debug data using filepath '%s'\n\n", found.path.c_str());
     }
+  }
+  else
+  {
+    m_DebugInfoLoadingLog =
+        StringFormat::Fmt("Found debug data in the shader\n\n", debugInfoPath.c_str());
+  }
+  if(!loadingLog.empty())
+  {
+    m_DebugInfoLoadingLog += StringFormat::Fmt("Details\n");
+    m_DebugInfoLoadingLog += StringFormat::Fmt("-------\n\n");
+    m_DebugInfoLoadingLog += loadingLog;
   }
 }
 
@@ -1381,7 +1759,8 @@ DXBCContainer::DXBCContainer(const bytebuf &ByteCode, const rdcstr &debugInfoPat
 
   m_ShaderBlob = ByteCode;
 
-  TryFetchSeparateDebugInfo(m_ShaderBlob, debugInfoPath);
+  if(RenderDoc::Inst().IsReplayApp())
+    TryFetchSeparateDebugInfo(m_ShaderBlob, debugInfoPath);
 
   // just for convenience
   byte *data = (byte *)m_ShaderBlob.data();
@@ -1748,6 +2127,14 @@ DXBCContainer::DXBCContainer(const bytebuf &ByteCode, const rdcstr &debugInfoPat
     {
       // root signature
     }
+    else if(*fourcc == FOURCC_PRIV)
+    {
+      // private data
+    }
+    else if(*fourcc == FOURCC_VERS)
+    {
+      // compiler version
+    }
     else if(*fourcc == FOURCC_RDAT)
     {
       m_RDATOffset = chunkContents - data;
@@ -1894,6 +2281,7 @@ DXBCContainer::DXBCContainer(const bytebuf &ByteCode, const rdcstr &debugInfoPat
 
   // if reflection information was stripped (or never emitted with DXIL), attempt to reverse
   // engineer basic info from declarations or read it from the DXIL
+  bool guessedReflection = false;
   if(m_Reflection == NULL)
   {
     // need to disassemble now to guess resources
@@ -1903,6 +2291,7 @@ DXBCContainer::DXBCContainer(const bytebuf &ByteCode, const rdcstr &debugInfoPat
       m_Reflection = dxilReflectProgram->BuildReflection();
     else
       m_Reflection = new Reflection;
+    guessedReflection = true;
   }
 
   if(dxilReflectProgram)
@@ -2182,7 +2571,11 @@ DXBCContainer::DXBCContainer(const bytebuf &ByteCode, const rdcstr &debugInfoPat
   }
 
   if(m_DXBCByteCode && m_DebugInfo == NULL && !m_DebugShaderBlob.empty())
+  {
     m_DebugInfo = ProcessPDB(m_DebugShaderBlob.data(), (uint32_t)m_DebugShaderBlob.size());
+    if(m_DebugInfo && guessedReflection)
+      m_DebugInfo->FillReflection(*m_Reflection);
+  }
 
   if(m_DXILByteCode)
     m_DebugInfo = m_DXILByteCode;
@@ -2199,6 +2592,33 @@ DXBCContainer::DXBCContainer(const bytebuf &ByteCode, const rdcstr &debugInfoPat
       m_DXBCByteCode->SetDebugInfo(m_DebugInfo);
 
     PreprocessLineDirectives(m_DebugInfo->Files);
+  }
+
+  // if we have DXIL bytecode, check for separate source-info chunks and layer them over the top
+  if(m_DXILByteCode)
+  {
+    // check debug header first, but we don't expect to see these in a non-debug header
+    for(uint32_t chunkIdx = 0; debugHeader && chunkIdx < debugHeader->numChunks; chunkIdx++)
+    {
+      const uint32_t *fourcc = (const uint32_t *)(debugData + debugChunkOffsets[chunkIdx]);
+      const uint32_t *chunkSize = (const uint32_t *)(fourcc + 1);
+
+      const byte *chunkContents = (const byte *)(chunkSize + 1);
+
+      if(*fourcc == FOURCC_SRCI)
+        ProcessSourceInfo(chunkContents, *chunkSize);
+    }
+
+    for(uint32_t chunkIdx = 0; header && chunkIdx < header->numChunks; chunkIdx++)
+    {
+      const uint32_t *fourcc = (const uint32_t *)(data + chunkOffsets[chunkIdx]);
+      const uint32_t *chunkSize = (const uint32_t *)(fourcc + 1);
+
+      const byte *chunkContents = (const byte *)(chunkSize + 1);
+
+      if(*fourcc == FOURCC_SRCI)
+        ProcessSourceInfo(chunkContents, *chunkSize);
+    }
   }
 
   // if we had bytecode in this container, ensure we had reflection. If it's a blob with only an
@@ -2242,6 +2662,297 @@ DXBCContainer::~DXBCContainer()
   SAFE_DELETE(m_DXILByteCode);
 
   SAFE_DELETE(m_Reflection);
+}
+
+struct SRCIHeader
+{
+  uint32_t size;    // utterly redundant?
+  uint16_t flags;
+  uint16_t numSections;
+};
+
+enum class SRCISectionType : uint16_t
+{
+  FileContents = 0,
+  Filenames,
+  Args,
+};
+
+struct SRCISection
+{
+  uint32_t sectionSize;
+  uint16_t flags;
+  SRCISectionType type;
+};
+
+struct SRCIArgsSection
+{
+  uint32_t flags;
+  uint32_t dataSize;
+  uint32_t numArgs;
+};
+
+struct SRCIFileContentsSection
+{
+  uint32_t sectionSize;    // NOTE For this section only, this is the size of the data *with* the
+                           // header. Who knows why?
+  uint16_t flags;
+  uint16_t zLibCompressed;
+  uint32_t dataSize;
+  uint32_t uncompressedDataSize;
+  uint32_t numFiles;
+};
+
+struct SRCIFileContentsEntry
+{
+  uint32_t entrySize;
+  uint32_t flags;
+  uint32_t fileSize;
+};
+
+struct SRCIFilenamesSection
+{
+  uint32_t flags;
+  uint32_t numFiles;
+  uint16_t dataSize;
+  // NOTE: NO PADDING HERE BECAUSE OF COURSE NOT
+  byte beginningOfData;
+
+  static constexpr size_t unpaddedSize() { return offsetof(SRCIFilenamesSection, beginningOfData); }
+};
+
+struct SRCIFilenameEntry
+{
+  uint32_t entrySize;
+  uint32_t flags;
+  uint32_t nameSize;
+  uint32_t fileSize;
+};
+
+void DXBCContainer::ProcessSourceInfo(const byte *chunkContents, uint32_t chunkSize)
+{
+  const SRCIHeader *srci = (const SRCIHeader *)chunkContents;
+  chunkContents += sizeof(SRCIHeader);
+
+  // redundant size? this should always be equal
+  RDCASSERTEQUAL(srci->size, chunkSize);
+  RDCASSERTEQUAL(srci->flags, 0);
+
+  rdcarray<ShaderSourceFile> &sourceFiles = m_DXILByteCode->Files;
+
+  if(!sourceFiles.empty())
+  {
+    // if we have source files, check that they're all at least empty
+    bool allEmpty = true;
+    for(const ShaderSourceFile &f : sourceFiles)
+      allEmpty &= f.contents.empty();
+
+    if(!allEmpty)
+      RDCERR("Some shader source files have contents being overridden by SRCI");
+    sourceFiles.clear();
+  }
+
+  for(uint32_t sec = 0; sec < srci->numSections; sec++)
+  {
+    const SRCISection *section = (const SRCISection *)chunkContents;
+    chunkContents += section->sectionSize;
+    RDCASSERTEQUAL(section->flags, 0);
+
+    const byte *sectionContents = (const byte *)(section + 1);
+    switch(section->type)
+    {
+      case SRCISectionType::FileContents:
+      {
+        const SRCIFileContentsSection *contents = (const SRCIFileContentsSection *)(section + 1);
+
+        // flags on flags on flags
+        RDCASSERTEQUAL(contents->flags, 0);
+        // not only would this be pointless if it contains the section size, but dxc seems to set it
+        // to 0 because of course it does.
+        RDCASSERTEQUAL(contents->sectionSize, 0);
+
+        if(!sourceFiles.empty() && sourceFiles.size() != contents->numFiles)
+        {
+          RDCERR(
+              "Unexpected number of source files in contents section %u when we have %zu already",
+              contents->numFiles, sourceFiles.size());
+          continue;
+        }
+
+        sourceFiles.resize(contents->numFiles);
+
+        bytebuf decompressedData;
+        const byte *contentsData = (const byte *)(contents + 1);
+
+        if(contents->zLibCompressed == 1)
+        {
+          decompressedData.resize(contents->uncompressedDataSize);
+
+          mz_stream stream = {};
+
+          stream.next_in = contentsData;
+          stream.avail_in = contents->dataSize;
+          stream.next_out = decompressedData.data();
+          stream.avail_out = contents->uncompressedDataSize;
+
+          int status = mz_inflateInit(&stream);
+          if(status != MZ_OK)
+          {
+            RDCERR("Couldn't initialise zlib decompressor");
+            continue;
+          }
+
+          status = mz_inflate(&stream, MZ_FINISH);
+          if(status != MZ_STREAM_END)
+          {
+            mz_inflateEnd(&stream);
+            RDCERR("zlib decompression failed");
+            continue;
+          }
+          RDCASSERTEQUAL((uint32_t)stream.total_out, contents->uncompressedDataSize);
+          decompressedData.resize(stream.total_out);
+
+          status = mz_inflateEnd(&stream);
+          if(status != MZ_OK)
+          {
+            RDCERR("Failed shutting down zlib decompressor");
+            continue;
+          }
+
+          contentsData = decompressedData.data();
+        }
+        else
+        {
+          RDCASSERTEQUAL(contents->zLibCompressed, 0);
+        }
+
+        for(uint32_t fileIdx = 0; fileIdx < contents->numFiles; fileIdx++)
+        {
+          const SRCIFileContentsEntry *contentsEntry = (const SRCIFileContentsEntry *)contentsData;
+          const char *fileContents = (const char *)(contentsEntry + 1);
+
+          // should be null terminated but don't take any chances because who knows if that will change
+          sourceFiles[fileIdx].contents.assign(fileContents, contentsEntry->fileSize - 1);
+
+          RDCASSERTEQUAL(fileContents[contentsEntry->fileSize - 1], 0);
+
+          // flags on flags on flags
+          RDCASSERTEQUAL(contentsEntry->flags, 0);
+
+          contentsData += contentsEntry->entrySize;
+        }
+        break;
+      }
+      case SRCISectionType::Filenames:
+      {
+        const SRCIFilenamesSection *names = (const SRCIFilenamesSection *)(section + 1);
+
+        // flags on flags on flags
+        RDCASSERTEQUAL(names->flags, 0);
+
+        RDCASSERTEQUAL(AlignUp4(names->dataSize + SRCIFilenamesSection::unpaddedSize()),
+                       AlignUp4(section->sectionSize - sizeof(SRCISection)));
+
+        if(!sourceFiles.empty() && sourceFiles.size() != names->numFiles)
+        {
+          RDCERR(
+              "Unexpected number of source files in filenames section %u when we have %zu already",
+              names->numFiles, sourceFiles.size());
+          continue;
+        }
+
+        sourceFiles.resize(names->numFiles);
+
+        const byte *nameContents = (const byte *)names + SRCIFilenamesSection::unpaddedSize();
+        for(uint32_t fileIdx = 0; fileIdx < names->numFiles; fileIdx++)
+        {
+          const SRCIFilenameEntry *filenameEntry = (const SRCIFilenameEntry *)nameContents;
+          const char *filename = (const char *)(filenameEntry + 1);
+
+          sourceFiles[fileIdx].filename.assign(filename, filenameEntry->nameSize - 1);
+
+          RDCASSERTEQUAL(filename[filenameEntry->nameSize - 1], 0);
+
+          nameContents += filenameEntry->entrySize;
+
+          // I have no idea what you're expected to do with this filesize. I guess pre-allocate, but why?
+          RDCASSERT(sourceFiles[fileIdx].contents.empty() ||
+                        sourceFiles[fileIdx].contents.size() == filenameEntry->fileSize,
+                    sourceFiles[fileIdx].contents.count(), filenameEntry->fileSize);
+        }
+
+        break;
+      }
+      case SRCISectionType::Args:
+      {
+        const SRCIArgsSection *args = (const SRCIArgsSection *)sectionContents;
+
+        // flags on flags on flags
+        RDCASSERTEQUAL(args->flags, 0);
+        RDCASSERTEQUAL(AlignUp4(args->dataSize + sizeof(SRCIArgsSection)),
+                       AlignUp4(section->sectionSize - sizeof(SRCISection)));
+
+        ShaderCompileFlags flags = m_DXILByteCode->GetShaderCompileFlags();
+
+        size_t cmdlineIdx = flags.flags.size();
+        for(size_t i = 0; i < flags.flags.size(); i++)
+        {
+          if(flags.flags[i].name == "preferSourceDebug")
+            continue;
+
+          if(flags.flags[i].name == "@cmdline")
+          {
+            cmdlineIdx = i;
+
+            // print an error if we're not just overriding default data, but continue to override
+            // assuming the SRCI is 'better' data
+            if(flags.flags[i].value != m_DXILByteCode->GetDefaultCommandLine())
+            {
+              RDCERR(
+                  "Unexpected non-default command line in existing DXIL data, will be "
+                  "overridden by SRCI information: %s",
+                  flags.flags[i].value.c_str());
+            }
+
+            continue;
+          }
+        }
+
+        // if we didn't find a @cmdline (we expect to always do that, even with no original debug
+        // source info), add one here
+        if(cmdlineIdx == flags.flags.size())
+          flags.flags.push_back({"@cmdline", ""});
+
+        flags.flags[cmdlineIdx].value.clear();
+
+        // NULL-terminated pairs of strings
+        const char *strData = (const char *)(args + 1);
+        for(uint32_t arg = 0; arg < args->numArgs; arg++)
+        {
+          const char *name = strData;
+          strData += strlen(name) + 1;
+          const char *value = strData;
+          strData += strlen(value) + 1;
+
+          if(arg > 0)
+            flags.flags[cmdlineIdx].value += " ";
+
+          flags.flags[cmdlineIdx].value += "-";
+          flags.flags[cmdlineIdx].value += name;
+          if(value[0] != 0)
+          {
+            flags.flags[cmdlineIdx].value += " ";
+            flags.flags[cmdlineIdx].value += value;
+          }
+        }
+
+        m_DXILByteCode->SetShaderCompileFlags(flags);
+
+        break;
+      }
+      default: RDCERR("Unexpected SRCI section type %u", section->type); break;
+    }
+  }
 }
 
 struct DxcArg

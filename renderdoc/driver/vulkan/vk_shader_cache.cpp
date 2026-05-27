@@ -1,7 +1,7 @@
 /******************************************************************************
  * The MIT License (MIT)
  *
- * Copyright (c) 2019-2024 Baldur Karlsson
+ * Copyright (c) 2018-2026 Baldur Karlsson
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -35,6 +35,8 @@ enum class FeatureCheck
   NonMetalBackend = 0x4,
   FormatlessWrite = 0x8,
   SampleShading = 0x10,
+  Geometry = 0x20,
+  MultiView = 0x40,
 };
 
 BITMASK_OPERATORS(FeatureCheck);
@@ -69,6 +71,9 @@ static const BuiltinShaderConfig builtinShaders[] = {
                         rdcspv::ShaderStage::Vertex),
     BuiltinShaderConfig(BuiltinShader::CheckerboardFS, EmbeddedResource(glsl_checkerboard_frag),
                         rdcspv::ShaderStage::Fragment),
+    BuiltinShaderConfig(BuiltinShader::CheckerboardMultiviewFS,
+                        EmbeddedResource(glsl_checkerboard_frag), rdcspv::ShaderStage::Fragment,
+                        FeatureCheck::MultiView, BuiltinShaderFlags::Multiview),
     BuiltinShaderConfig(BuiltinShader::TexDisplayFS, EmbeddedResource(glsl_texdisplay_frag),
                         rdcspv::ShaderStage::Fragment),
     BuiltinShaderConfig(BuiltinShader::FixedColFS, EmbeddedResource(glsl_fixedcol_frag),
@@ -89,17 +94,22 @@ static const BuiltinShaderConfig builtinShaders[] = {
                         rdcspv::ShaderStage::Fragment, FeatureCheck::FragmentStores),
     BuiltinShaderConfig(BuiltinShader::QuadResolveMultiviewFS,
                         EmbeddedResource(glsl_quadresolve_frag), rdcspv::ShaderStage::Fragment,
-                        FeatureCheck::FragmentStores, BuiltinShaderFlags::Multiview),
+                        FeatureCheck::FragmentStores | FeatureCheck::MultiView,
+                        BuiltinShaderFlags::Multiview),
     BuiltinShaderConfig(BuiltinShader::QuadWriteFS, EmbeddedResource(glsl_quadwrite_frag),
                         rdcspv::ShaderStage::Fragment),
-    BuiltinShaderConfig(BuiltinShader::QuadWriteMultiviewFS, EmbeddedResource(glsl_quadwrite_frag),
-                        rdcspv::ShaderStage::Fragment,
-                        FeatureCheck::FragmentStores | FeatureCheck::NonMetalBackend,
-                        BuiltinShaderFlags::Multiview),
+    BuiltinShaderConfig(
+        BuiltinShader::QuadWriteMultiviewFS, EmbeddedResource(glsl_quadwrite_frag),
+        rdcspv::ShaderStage::Fragment,
+        FeatureCheck::FragmentStores | FeatureCheck::NonMetalBackend | FeatureCheck::MultiView,
+        BuiltinShaderFlags::Multiview),
     BuiltinShaderConfig(BuiltinShader::TrisizeGS, EmbeddedResource(glsl_trisize_geom),
                         rdcspv::ShaderStage::Geometry),
     BuiltinShaderConfig(BuiltinShader::TrisizeFS, EmbeddedResource(glsl_trisize_frag),
                         rdcspv::ShaderStage::Fragment),
+    BuiltinShaderConfig(BuiltinShader::TrisizeMultiviewFS, EmbeddedResource(glsl_trisize_frag),
+                        rdcspv::ShaderStage::Fragment, FeatureCheck::MultiView,
+                        BuiltinShaderFlags::Multiview),
     BuiltinShaderConfig(BuiltinShader::TexRemap, EmbeddedResource(glsl_texremap_frag),
                         rdcspv::ShaderStage::Fragment, FeatureCheck::NoCheck,
                         BuiltinShaderFlags::BaseTypeParameterised),
@@ -110,7 +120,7 @@ static const BuiltinShaderConfig builtinShaders[] = {
                         rdcspv::ShaderStage::Compute),
     BuiltinShaderConfig(BuiltinShader::PixelHistoryPrimIDFS,
                         EmbeddedResource(glsl_pixelhistory_primid_frag),
-                        rdcspv::ShaderStage::Fragment),
+                        rdcspv::ShaderStage::Fragment, FeatureCheck::Geometry),
     BuiltinShaderConfig(BuiltinShader::ShaderDebugSampleVS,
                         EmbeddedResource(glsl_shaderdebug_sample_vert), rdcspv::ShaderStage::Vertex),
     BuiltinShaderConfig(BuiltinShader::DiscardFS, EmbeddedResource(glsl_discard_frag),
@@ -141,14 +151,15 @@ static const BuiltinShaderConfig builtinShaders[] = {
     BuiltinShaderConfig(BuiltinShader::DepthCopyFS, EmbeddedResource(glsl_depth_copy_frag),
                         rdcspv::ShaderStage::Fragment, FeatureCheck::FragmentStores),
     BuiltinShaderConfig(BuiltinShader::DepthCopyMSFS, EmbeddedResource(glsl_depth_copyms_frag),
-                        rdcspv::ShaderStage::Fragment, FeatureCheck::FragmentStores),
+                        rdcspv::ShaderStage::Fragment,
+                        FeatureCheck::SampleShading | FeatureCheck::FragmentStores),
 };
 
 RDCCOMPILE_ASSERT(ARRAY_COUNT(builtinShaders) == arraydim<BuiltinShader>(),
                   "Missing built-in shader config");
 
-static bool PassesChecks(const BuiltinShaderConfig &config, const VkDriverInfo &driverVersion,
-                         const VkPhysicalDeviceFeatures &features)
+static bool PassesChecks(const BuiltinShaderConfig &config, const WrappedVulkan *driver,
+                         const VkDriverInfo &driverVersion, const VkPhysicalDeviceFeatures &features)
 {
   if(config.checks & FeatureCheck::ShaderMSAAStorage)
   {
@@ -187,6 +198,22 @@ static bool PassesChecks(const BuiltinShaderConfig &config, const VkDriverInfo &
     // via a more advanced query
     if(driverVersion.RunningOnMetal())
       return false;
+  }
+
+  if(config.checks & FeatureCheck::Geometry)
+  {
+    if(!features.geometryShader)
+    {
+      return false;
+    }
+  }
+
+  if(config.checks & FeatureCheck::MultiView)
+  {
+    if(!driver->MultiView())
+    {
+      return false;
+    }
   }
 
   if(config.stage == rdcspv::ShaderStage::Geometry && !features.geometryShader)
@@ -253,8 +280,28 @@ VulkanShaderCache::VulkanShaderCache(WrappedVulkan *driver)
   rdcspv::CompilationSettings compileSettings;
   compileSettings.lang = rdcspv::InputLanguage::VulkanGLSL;
 
-  m_Buffer2MSSupported =
-      PassesChecks(builtinShaders[(size_t)BuiltinShader::Buffer2MSCS], driverVersion, availFeatures);
+  uint32_t toolCount = 0;
+  if(ObjDisp(driver->GetPhysDev())->GetPhysicalDeviceToolProperties != NULL)
+  {
+    ObjDisp(driver->GetPhysDev())
+        ->GetPhysicalDeviceToolProperties(Unwrap(driver->GetPhysDev()), &toolCount, NULL);
+    rdcarray<VkPhysicalDeviceToolProperties> tools;
+    tools.resize(toolCount);
+    ObjDisp(driver->GetPhysDev())
+        ->GetPhysicalDeviceToolProperties(Unwrap(driver->GetPhysDev()), &toolCount, tools.data());
+
+    for(const VkPhysicalDeviceToolProperties &t : tools)
+    {
+      if(rdcstr(t.name) == "RenderDoc")
+      {
+        RDCLOG("Enabling debug info for self-captured shaders");
+        compileSettings.debugInfo = true;
+      }
+    }
+  }
+
+  m_Buffer2MSSupported = PassesChecks(builtinShaders[(size_t)BuiltinShader::Buffer2MSCS], driver,
+                                      driverVersion, availFeatures);
 
   for(auto i : indices<BuiltinShader>())
   {
@@ -262,7 +309,7 @@ VulkanShaderCache::VulkanShaderCache(WrappedVulkan *driver)
 
     RDCASSERT(config.builtin == (BuiltinShader)i);
 
-    bool passesChecks = PassesChecks(config, driverVersion, enabledFeatures);
+    bool passesChecks = PassesChecks(config, driver, driverVersion, enabledFeatures);
 
     if(!passesChecks)
       continue;
@@ -302,7 +349,10 @@ VulkanShaderCache::VulkanShaderCache(WrappedVulkan *driver)
         // determine if we can skip the call to GenerateGLSLShader (which calls out to glslang).
         // Otherwise we'll use the cached SPIR-V generated by the previous call using the same
         // source & defines.
-        inputHash = strhash("inputHashVersion1", inputHash);
+        inputHash = strhash("inputHashVersion2", inputHash);
+
+        if(compileSettings.debugInfo)
+          inputHash = strhash("debug", inputHash);
 
         rdcstr err;
 
@@ -408,16 +458,12 @@ VulkanShaderCache::VulkanShaderCache(WrappedVulkan *driver)
 
     if(vkr == VK_SUCCESS)
     {
-      ResourceId id =
-          m_pDriver->GetResourceManager()->WrapResource(Unwrap(m_Device), m_PipelineCache);
+      ResourceId id = m_pDriver->GetResourceManager()->WrapResource(ResourceId(), Unwrap(m_Device),
+                                                                    m_PipelineCache);
 
       if(IsCaptureMode(m_pDriver->GetState()))
       {
         m_pDriver->GetResourceManager()->AddResourceRecord(m_PipelineCache);
-      }
-      else
-      {
-        m_pDriver->GetResourceManager()->AddLiveResource(id, m_PipelineCache);
       }
     }
   }
@@ -587,6 +633,7 @@ void VulkanShaderCache::MakeGraphicsPipelineInfo(VkGraphicsPipelineCreateInfo &p
   uint32_t dataOffset = 0;
 
   static VkPipelineShaderStageRequiredSubgroupSizeCreateInfo reqSubgroupSize[NumShaderStages] = {};
+  static VkPipelineRobustnessCreateInfo shaderRobustness[NumShaderStages] = {};
 
   // reserve space for spec constants
   for(uint32_t i = 0; i < NumShaderStages; i++)
@@ -595,17 +642,31 @@ void VulkanShaderCache::MakeGraphicsPipelineInfo(VkGraphicsPipelineCreateInfo &p
     {
       stages[stageCount].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
       stages[stageCount].stage = (VkShaderStageFlagBits)(1 << i);
-      stages[stageCount].module = rm->GetCurrentHandle<VkShaderModule>(pipeInfo.shaders[i].module);
+      stages[stageCount].module = rm->GetHandle<VkShaderModule>(pipeInfo.shaders[i].module);
       stages[stageCount].pName = pipeInfo.shaders[i].entryPoint.c_str();
       stages[stageCount].pNext = NULL;
       stages[stageCount].pSpecializationInfo = NULL;
+      stages[stageCount].flags = pipeInfo.shaders[i].flags;
 
       if(pipeInfo.shaders[i].requiredSubgroupSize != 0)
       {
+        reqSubgroupSize[i].requiredSubgroupSize = pipeInfo.shaders[i].requiredSubgroupSize;
+
         reqSubgroupSize[i].sType =
             VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO;
-        reqSubgroupSize[i].requiredSubgroupSize = pipeInfo.shaders[i].requiredSubgroupSize;
+        reqSubgroupSize[i].pNext = (void *)stages[stageCount].pNext;
         stages[stageCount].pNext = &reqSubgroupSize[i];
+      }
+
+      if(pipeInfo.shaders[i].HasRobustness())
+      {
+        shaderRobustness[i].images = pipeInfo.shaders[i].imageRobustness;
+        shaderRobustness[i].uniformBuffers = pipeInfo.shaders[i].uniformBufferRobustness;
+        shaderRobustness[i].storageBuffers = pipeInfo.shaders[i].storageBufferRobustness;
+
+        shaderRobustness[i].sType = VK_STRUCTURE_TYPE_PIPELINE_ROBUSTNESS_CREATE_INFO;
+        shaderRobustness[i].pNext = stages[stageCount].pNext;
+        stages[stageCount].pNext = &shaderRobustness;
       }
 
       if(!pipeInfo.shaders[i].specialization.empty())
@@ -666,10 +727,10 @@ void VulkanShaderCache::MakeGraphicsPipelineInfo(VkGraphicsPipelineCreateInfo &p
                                                                  : VK_VERTEX_INPUT_RATE_VERTEX;
   }
 
-  static VkPipelineVertexInputDivisorStateCreateInfoKHR vertexDivisor = {
-      VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_DIVISOR_STATE_CREATE_INFO_KHR,
+  static VkPipelineVertexInputDivisorStateCreateInfo vertexDivisor = {
+      VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_DIVISOR_STATE_CREATE_INFO,
   };
-  static VkVertexInputBindingDivisorDescriptionKHR vibindDivisors[128] = {};
+  static VkVertexInputBindingDivisorDescription vibindDivisors[128] = {};
 
   if(m_pDriver->GetExtensions(GetRecord(m_Device)).ext_EXT_vertex_attribute_divisor ||
      m_pDriver->GetExtensions(GetRecord(m_Device)).ext_KHR_vertex_attribute_divisor)
@@ -811,11 +872,12 @@ void VulkanShaderCache::MakeGraphicsPipelineInfo(VkGraphicsPipelineCreateInfo &p
     rs.pNext = &depthClipState;
   }
 
-  static VkPipelineRasterizationLineStateCreateInfoEXT lineRasterState = {
-      VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_LINE_STATE_CREATE_INFO_EXT,
+  static VkPipelineRasterizationLineStateCreateInfo lineRasterState = {
+      VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_LINE_STATE_CREATE_INFO,
   };
 
-  if(m_pDriver->GetExtensions(GetRecord(m_Device)).ext_EXT_line_rasterization)
+  if(m_pDriver->GetExtensions(GetRecord(m_Device)).ext_EXT_line_rasterization ||
+     m_pDriver->GetExtensions(GetRecord(m_Device)).ext_KHR_line_rasterization)
   {
     lineRasterState.lineRasterizationMode = pipeInfo.lineRasterMode;
     lineRasterState.stippledLineEnable = pipeInfo.stippleEnabled;
@@ -919,7 +981,7 @@ void VulkanShaderCache::MakeGraphicsPipelineInfo(VkGraphicsPipelineCreateInfo &p
   VkGraphicsPipelineCreateInfo ret = {
       VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
       NULL,
-      pipeInfo.flags,
+      0,
       stageCount,
       stages,
       &vi,
@@ -932,7 +994,7 @@ void VulkanShaderCache::MakeGraphicsPipelineInfo(VkGraphicsPipelineCreateInfo &p
       &cb,
       &dyn,
       VK_NULL_HANDLE,
-      rm->GetCurrentHandle<VkRenderPass>(pipeInfo.renderpass),
+      rm->GetHandle<VkRenderPass>(pipeInfo.renderpass),
       pipeInfo.subpass,
       VK_NULL_HANDLE,    // base pipeline handle
       0,                 // base pipeline index
@@ -941,7 +1003,7 @@ void VulkanShaderCache::MakeGraphicsPipelineInfo(VkGraphicsPipelineCreateInfo &p
   // if the layouts are the same object (non-library case) we can just use it directly
   if(pipeInfo.vertLayout == pipeInfo.fragLayout)
   {
-    ret.layout = rm->GetCurrentHandle<VkPipelineLayout>(pipeInfo.vertLayout);
+    ret.layout = rm->GetHandle<VkPipelineLayout>(pipeInfo.vertLayout);
   }
   else
   {
@@ -951,11 +1013,13 @@ void VulkanShaderCache::MakeGraphicsPipelineInfo(VkGraphicsPipelineCreateInfo &p
       rdcarray<VkDescriptorSetLayout> descSetLayouts;
 
       for(ResourceId setLayout : pipeInfo.descSetLayouts)
-        descSetLayouts.push_back(rm->GetCurrentHandle<VkDescriptorSetLayout>(setLayout));
+        descSetLayouts.push_back(rm->GetHandle<VkDescriptorSetLayout>(setLayout));
 
       // don't have to handle separate vert/frag layouts as push constant ranges must be identical
       const VulkanCreationInfo::PipelineLayout &pipeLayoutInfo =
-          m_pDriver->m_CreationInfo.m_PipelineLayout[pipeInfo.vertLayout];
+          m_pDriver->m_CreationInfo
+              .m_PipelineLayout[pipeInfo.ownLayout != ResourceId() ? pipeInfo.ownLayout
+                                                                   : pipeInfo.vertLayout];
       const rdcarray<VkPushConstantRange> &push = pipeLayoutInfo.pushRanges;
 
       VkPipelineLayoutCreateInfo pipeLayoutCreateInfo = {
@@ -990,6 +1054,22 @@ void VulkanShaderCache::MakeGraphicsPipelineInfo(VkGraphicsPipelineCreateInfo &p
 
     dynRenderCreate.pNext = ret.pNext;
     ret.pNext = &dynRenderCreate;
+  }
+
+  static VkFormat customResColFormats[16] = {};
+  static VkCustomResolveCreateInfoEXT customResCreate = {
+      VK_STRUCTURE_TYPE_CUSTOM_RESOLVE_CREATE_INFO_EXT, NULL, VK_FALSE, 0, customResColFormats};
+
+  if(pipeInfo.renderpass == ResourceId() && (pipeInfo.hasCustomResCreateInfo))
+  {
+    customResCreate.customResolve = pipeInfo.customResCreateInfo.customResolve;
+    customResCreate.colorAttachmentCount = (uint32_t)pipeInfo.customResCreateInfo.colorFormats.size();
+    memcpy(customResColFormats, pipeInfo.customResCreateInfo.colorFormats.data(),
+           pipeInfo.customResCreateInfo.colorFormats.byteSize());
+    customResCreate.depthAttachmentFormat = pipeInfo.customResCreateInfo.depthFormat;
+    customResCreate.stencilAttachmentFormat = pipeInfo.customResCreateInfo.stencilFormat;
+    customResCreate.pNext = ret.pNext;
+    ret.pNext = &customResCreate;
   }
 
   static VkPipelineDiscardRectangleStateCreateInfoEXT discardRects = {
@@ -1034,11 +1114,58 @@ void VulkanShaderCache::MakeGraphicsPipelineInfo(VkGraphicsPipelineCreateInfo &p
     rs.pNext = &provokeSetup;
   }
 
+  uint64_t flags = pipeInfo.flags;
   // never create derivatives
-  ret.flags &= ~VK_PIPELINE_CREATE_DERIVATIVE_BIT;
+  flags &= ~VK_PIPELINE_CREATE_DERIVATIVE_BIT;
 
-  ret.flags &= ~VK_PIPELINE_CREATE_LIBRARY_BIT_KHR;
-  ret.flags &= ~VK_PIPELINE_CREATE_RETAIN_LINK_TIME_OPTIMIZATION_INFO_BIT_EXT;
+  flags &= ~VK_PIPELINE_CREATE_LIBRARY_BIT_KHR;
+  flags &= ~VK_PIPELINE_CREATE_RETAIN_LINK_TIME_OPTIMIZATION_INFO_BIT_EXT;
+
+  static VkPipelineCreateFlags2CreateInfo createFlags = {
+      VK_STRUCTURE_TYPE_PIPELINE_CREATE_FLAGS_2_CREATE_INFO,
+  };
+
+  if(pipeInfo.useCreateFlags2 && m_pDriver->Maintenance5())
+  {
+    createFlags.flags = flags;
+
+    createFlags.pNext = ret.pNext;
+    ret.pNext = &createFlags;
+  }
+  else
+  {
+    ret.flags = (uint32_t)flags;
+  }
+
+  static VkPipelineRobustnessCreateInfo VkPipelineRobustnessCreateInfo = {
+      VK_STRUCTURE_TYPE_PIPELINE_ROBUSTNESS_CREATE_INFO,
+  };
+
+  // we only need to specify vertex input robustness, all per-shader robustness is handled via
+  // pNexts on the stages above
+  if(pipeInfo.vertexInputRobustness != VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DEVICE_DEFAULT)
+  {
+    VkPipelineRobustnessCreateInfo.vertexInputs = pipeInfo.vertexInputRobustness;
+
+    VkPipelineRobustnessCreateInfo.pNext = ret.pNext;
+    ret.pNext = &VkPipelineRobustnessCreateInfo;
+  }
+
+  static VkPipelineFragmentDensityMapLayeredCreateInfoVALVE
+      VkPipelineFragmentDensityMapLayeredCreateInfoVALVE = {
+          VK_STRUCTURE_TYPE_PIPELINE_FRAGMENT_DENSITY_MAP_LAYERED_CREATE_INFO_VALVE,
+      };
+
+  // we only need to specify vertex input robustness, all per-shader robustness is handled via
+  // pNexts on the stages above
+  if(pipeInfo.maxFragmentDensityMapLayers)
+  {
+    VkPipelineFragmentDensityMapLayeredCreateInfoVALVE.maxFragmentDensityMapLayers =
+        pipeInfo.maxFragmentDensityMapLayers;
+
+    VkPipelineFragmentDensityMapLayeredCreateInfoVALVE.pNext = ret.pNext;
+    ret.pNext = &VkPipelineFragmentDensityMapLayeredCreateInfoVALVE;
+  }
 
   pipeCreateInfo = ret;
 }
@@ -1068,11 +1195,11 @@ void VulkanShaderCache::MakeComputePipelineInfo(VkComputePipelineCreateInfo &pip
 
   stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
   stage.stage = (VkShaderStageFlagBits)(1 << i);
-  stage.module = rm->GetCurrentHandle<VkShaderModule>(pipeInfo.shaders[i].module);
+  stage.module = rm->GetHandle<VkShaderModule>(pipeInfo.shaders[i].module);
   stage.pName = pipeInfo.shaders[i].entryPoint.c_str();
   stage.pNext = NULL;
   stage.pSpecializationInfo = NULL;
-  stage.flags = 0;
+  stage.flags = pipeInfo.shaders[i].flags;
 
   uint32_t dataOffset = 0;
 
@@ -1104,21 +1231,52 @@ void VulkanShaderCache::MakeComputePipelineInfo(VkComputePipelineCreateInfo &pip
   if(pipeInfo.shaders[i].requiredSubgroupSize != 0)
   {
     reqSubgroupSize.requiredSubgroupSize = pipeInfo.shaders[i].requiredSubgroupSize;
+    reqSubgroupSize.pNext = (void *)stage.pNext;
     stage.pNext = &reqSubgroupSize;
+  }
+
+  static VkPipelineRobustnessCreateInfo robustness = {
+      VK_STRUCTURE_TYPE_PIPELINE_ROBUSTNESS_CREATE_INFO,
+  };
+
+  if(pipeInfo.shaders[i].HasRobustness())
+  {
+    robustness.images = pipeInfo.shaders[i].imageRobustness;
+    robustness.uniformBuffers = pipeInfo.shaders[i].uniformBufferRobustness;
+    robustness.storageBuffers = pipeInfo.shaders[i].storageBufferRobustness;
+    robustness.pNext = stage.pNext;
+    stage.pNext = &robustness;
   }
 
   VkComputePipelineCreateInfo ret = {
       VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
       NULL,
-      pipeInfo.flags,
+      0,
       stage,
-      rm->GetCurrentHandle<VkPipelineLayout>(pipeInfo.compLayout),
+      rm->GetHandle<VkPipelineLayout>(pipeInfo.compLayout),
       VK_NULL_HANDLE,    // base pipeline handle
       0,                 // base pipeline index
   };
 
+  uint64_t flags = pipeInfo.flags;
   // never create derivatives
-  ret.flags &= ~VK_PIPELINE_CREATE_DERIVATIVE_BIT;
+  flags &= ~VK_PIPELINE_CREATE_DERIVATIVE_BIT;
+
+  static VkPipelineCreateFlags2CreateInfo createFlags = {
+      VK_STRUCTURE_TYPE_PIPELINE_CREATE_FLAGS_2_CREATE_INFO,
+  };
+
+  if(pipeInfo.useCreateFlags2 && m_pDriver->Maintenance5())
+  {
+    createFlags.flags = flags;
+
+    createFlags.pNext = ret.pNext;
+    ret.pNext = &createFlags;
+  }
+  else
+  {
+    ret.flags = (uint32_t)flags;
+  }
 
   pipeCreateInfo = ret;
 }
@@ -1160,7 +1318,7 @@ void VulkanShaderCache::MakeShaderObjectInfo(VkShaderCreateInfoEXT &shadCreateIn
   descSetLayouts = {};
 
   for(ResourceId setLayout : shadInfo.descSetLayouts)
-    descSetLayouts.push_back(rm->GetCurrentHandle<VkDescriptorSetLayout>(setLayout));
+    descSetLayouts.push_back(rm->GetHandle<VkDescriptorSetLayout>(setLayout));
 
   VkShaderCreateInfoEXT ret = {VK_STRUCTURE_TYPE_SHADER_CREATE_INFO_EXT,
                                NULL,
@@ -1201,5 +1359,20 @@ void VulkanShaderCache::MakeShaderObjectInfo(VkShaderCreateInfoEXT &shadCreateIn
     specInfo.pData = specdata.data();
   }
 
+  static VkCustomResolveCreateInfoEXT customResCreate = {
+      VK_STRUCTURE_TYPE_CUSTOM_RESOLVE_CREATE_INFO_EXT,
+      NULL,
+      VK_FALSE,
+      0,
+      NULL,
+      VK_FORMAT_UNDEFINED,
+      VK_FORMAT_UNDEFINED,
+  };
+  if(shadInfo.hasCustomResCreateInfo)
+  {
+    customResCreate.customResolve = shadInfo.customResolve;
+    customResCreate.pNext = ret.pNext;
+    ret.pNext = &customResCreate;
+  }
   shadCreateInfo = ret;
 }

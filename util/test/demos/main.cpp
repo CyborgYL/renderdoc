@@ -1,7 +1,7 @@
 /******************************************************************************
  * The MIT License (MIT)
  *
- * Copyright (c) 2019-2024 Baldur Karlsson
+ * Copyright (c) 2018-2026 Baldur Karlsson
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -395,7 +395,7 @@ int main(int argc, char **argv)
   if(argc >= 2 && (!strcmp(argv[1], "--help") || !strcmp(argv[1], "-h") || !strcmp(argv[1], "-?") ||
                    !strcmp(argv[1], "/help") || !strcmp(argv[1], "/h") || !strcmp(argv[1], "/?")))
   {
-    printf(R"(RenderDoc testing demo program
+    OutputPrint(R"(RenderDoc testing demo program
 
 Usage: %s Test_Name [test_options]
 
@@ -417,9 +417,8 @@ Usage: %s Test_Name [test_options]
                                 environment variable, or else in the data/demos
                                 folder next to the executable.
 )",
-           argc == 0 ? "demos" : argv[0]);
+                argc == 0 ? "demos" : argv[0]);
 
-    fflush(stdout);
     return 1;
   }
 
@@ -434,38 +433,38 @@ Usage: %s Test_Name [test_options]
       if(test.API != prev)
       {
         if(prev != TestAPI::Count)
-          printf("\n\n");
-        printf("======== %s tests ========\n\n", APIName(test.API));
+          OutputPrint("\n\n");
+        OutputPrint("======== %s tests ========\n\n", APIName(test.API));
       }
 
       prev = test.API;
 
-      printf("%s: %s", test.Name, test.IsAvailable() ? "Available" : "Unavailable");
+      OutputPrint("%s: %s", test.Name, test.IsAvailable() ? "Available" : "Unavailable");
 
       if(!test.IsAvailable())
-        printf(" because %s", test.AvailMessage());
+        OutputPrint(" because %s", test.AvailMessage());
 
-      printf("\n\t%s\n\n", test.Description);
+      OutputPrint("\n\t%s\n\n", test.Description);
     }
 
-    fflush(stdout);
     return 1;
   }
 
   if(argc >= 2 && !strcmp(argv[1], "--list-raw"))
   {
+    SetDebugLogEnabled(false);
+
     check_tests(argc, argv);
 
     // output TSV
-    printf("Name\tAvailable\tAvailMessage\n");
+    OutputPrint("Name\tAvailable\tAvailMessage\n");
 
     for(const TestMetadata &test : tests)
     {
-      printf("%s\t%s\t%s\n", test.Name, test.IsAvailable() ? "True" : "False",
-             test.IsAvailable() ? "Available" : test.AvailMessage());
+      OutputPrint("%s\t%s\t%s\n", test.Name, test.IsAvailable() ? "True" : "False",
+                  test.IsAvailable() ? "Available" : test.AvailMessage());
     }
 
-    fflush(stdout);
     return 1;
   }
 
@@ -695,7 +694,6 @@ Usage: %s Test_Name [test_options]
   }
 
   TEST_ERROR("%s is not a known test", argv[1]);
-
   return 2;
 }
 
@@ -743,7 +741,7 @@ int WINAPI wWinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrevInstance, _In_
 struct android_app *android_state;
 pthread_t cmdthread_handle = 0;
 
-#define ANDROID_LOG(...) __android_log_print(ANDROID_LOG_INFO, "rd_demos", __VA_ARGS__);
+#define ANDROID_LOG(...) __android_log_print(ANDROID_LOG_DEBUG, "rd_demos", __VA_ARGS__);
 
 std::vector<std::string> getArgs()
 {
@@ -826,7 +824,11 @@ void android_main(struct android_app *state)
   android_poll_source *source;
   do
   {
+#if __NDK_MAJOR__ >= 27
+    if(ALooper_pollOnce(1, nullptr, &events, (void **)&source) >= 0)
+#else
     if(ALooper_pollAll(1, nullptr, &events, (void **)&source) >= 0)
+#endif
     {
       if(source != NULL)
         source->process(android_state, source);

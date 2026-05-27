@@ -1,7 +1,7 @@
 /******************************************************************************
  * The MIT License (MIT)
  *
- * Copyright (c) 2020-2024 Baldur Karlsson
+ * Copyright (c) 2019-2026 Baldur Karlsson
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -25,7 +25,7 @@
 /******************************************************************************
  * Generated from Khronos's vk.xml:
  *
- * Copyright 2015-2024 The Khronos Group Inc.
+ * Copyright 2015-2026 The Khronos Group Inc.
  *
  * SPDX-License-Identifier: Apache-2.0 OR MIT
  * *
@@ -53,7 +53,7 @@
 
 struct VkInstDispatchTable
 {
-  // Vulkan core API interface definitions
+  // Vulkan base API interface definitions
   PFN_vkCreateInstance CreateInstance;
   PFN_vkDestroyInstance DestroyInstance;
   PFN_vkEnumeratePhysicalDevices EnumeratePhysicalDevices;
@@ -71,7 +71,7 @@ struct VkInstDispatchTable
   PFN_vkEnumerateDeviceLayerProperties EnumerateDeviceLayerProperties;
   PFN_vkGetPhysicalDeviceSparseImageFormatProperties GetPhysicalDeviceSparseImageFormatProperties;
 
-  // Vulkan 1.1 core API interface definitions.
+  // Vulkan base 1.1 API interface definitions.
   PFN_vkEnumerateInstanceVersion EnumerateInstanceVersion;
   PFN_vkEnumeratePhysicalDeviceGroups EnumeratePhysicalDeviceGroups;
   PFN_vkGetPhysicalDeviceFeatures2 GetPhysicalDeviceFeatures2;
@@ -85,7 +85,7 @@ struct VkInstDispatchTable
   PFN_vkGetPhysicalDeviceExternalFenceProperties GetPhysicalDeviceExternalFenceProperties;
   PFN_vkGetPhysicalDeviceExternalSemaphoreProperties GetPhysicalDeviceExternalSemaphoreProperties;
 
-  // Vulkan 1.3 core API interface definitions.
+  // Vulkan base 1.3 API interface definitions.
   PFN_vkGetPhysicalDeviceToolProperties GetPhysicalDeviceToolProperties;
 
   // VK_KHR_surface
@@ -185,6 +185,11 @@ struct VkInstDispatchTable
   PFN_vkDestroyDebugReportCallbackEXT DestroyDebugReportCallbackEXT;
   PFN_vkDebugReportMessageEXT DebugReportMessageEXT;
 
+  // VK_GGP_stream_descriptor_surface
+#ifdef VK_USE_PLATFORM_GGP
+  PFN_vkCreateStreamDescriptorSurfaceGGP CreateStreamDescriptorSurfaceGGP;
+#endif // VK_USE_PLATFORM_GGP
+
   // VK_NV_external_memory_capabilities
   PFN_vkGetPhysicalDeviceExternalImageFormatPropertiesNV GetPhysicalDeviceExternalImageFormatPropertiesNV;
 
@@ -219,6 +224,9 @@ struct VkInstDispatchTable
   PFN_vkCreateDebugUtilsMessengerEXT CreateDebugUtilsMessengerEXT;
   PFN_vkDestroyDebugUtilsMessengerEXT DestroyDebugUtilsMessengerEXT;
   PFN_vkSubmitDebugUtilsMessageEXT SubmitDebugUtilsMessageEXT;
+
+  // VK_EXT_descriptor_heap
+  PFN_vkGetPhysicalDeviceDescriptorSizeEXT GetPhysicalDeviceDescriptorSizeEXT;
 
   // VK_EXT_sample_locations
   PFN_vkGetPhysicalDeviceMultisamplePropertiesEXT GetPhysicalDeviceMultisamplePropertiesEXT;
@@ -275,13 +283,40 @@ struct VkInstDispatchTable
   PFN_vkGetPhysicalDeviceScreenPresentationSupportQNX GetPhysicalDeviceScreenPresentationSupportQNX;
 #endif // VK_USE_PLATFORM_SCREEN_QNX
 
+  // VK_ARM_tensors
+  PFN_vkGetPhysicalDeviceExternalTensorPropertiesARM GetPhysicalDeviceExternalTensorPropertiesARM;
+
   // VK_NV_optical_flow
   PFN_vkGetPhysicalDeviceOpticalFlowImageFormatsNV GetPhysicalDeviceOpticalFlowImageFormatsNV;
+
+  // VK_NV_cooperative_vector
+  PFN_vkGetPhysicalDeviceCooperativeVectorPropertiesNV GetPhysicalDeviceCooperativeVectorPropertiesNV;
+
+  // VK_ARM_data_graph
+  PFN_vkGetPhysicalDeviceQueueFamilyDataGraphPropertiesARM GetPhysicalDeviceQueueFamilyDataGraphPropertiesARM;
+  PFN_vkGetPhysicalDeviceQueueFamilyDataGraphProcessingEnginePropertiesARM GetPhysicalDeviceQueueFamilyDataGraphProcessingEnginePropertiesARM;
+
+  // VK_OHOS_surface
+#ifdef VK_USE_PLATFORM_OHOS
+  PFN_vkCreateSurfaceOHOS CreateSurfaceOHOS;
+#endif // VK_USE_PLATFORM_OHOS
+
+  // VK_NV_cooperative_matrix2
+  PFN_vkGetPhysicalDeviceCooperativeMatrixFlexibleDimensionsPropertiesNV GetPhysicalDeviceCooperativeMatrixFlexibleDimensionsPropertiesNV;
+
+  // VK_ARM_performance_counters_by_region
+  PFN_vkEnumeratePhysicalDeviceQueueFamilyPerformanceCountersByRegionARM EnumeratePhysicalDeviceQueueFamilyPerformanceCountersByRegionARM;
+
+  // VK_SEC_ubm_surface
+#ifdef VK_USE_PLATFORM_UBM_SEC
+  PFN_vkCreateUbmSurfaceSEC CreateUbmSurfaceSEC;
+  PFN_vkGetPhysicalDeviceUbmPresentationSupportSEC GetPhysicalDeviceUbmPresentationSupportSEC;
+#endif // VK_USE_PLATFORM_UBM_SEC
 };
 
 struct VkDevDispatchTable
 {
-  // Vulkan core API interface definitions
+  // Vulkan base API interface definitions
   PFN_vkGetDeviceProcAddr GetDeviceProcAddr;
   PFN_vkDestroyDevice DestroyDevice;
   PFN_vkGetDeviceQueue GetDeviceQueue;
@@ -308,30 +343,52 @@ struct VkDevDispatchTable
   PFN_vkWaitForFences WaitForFences;
   PFN_vkCreateSemaphore CreateSemaphore;
   PFN_vkDestroySemaphore DestroySemaphore;
-  PFN_vkCreateEvent CreateEvent;
-  PFN_vkDestroyEvent DestroyEvent;
-  PFN_vkGetEventStatus GetEventStatus;
-  PFN_vkSetEvent SetEvent;
-  PFN_vkResetEvent ResetEvent;
   PFN_vkCreateQueryPool CreateQueryPool;
   PFN_vkDestroyQueryPool DestroyQueryPool;
   PFN_vkGetQueryPoolResults GetQueryPoolResults;
   PFN_vkCreateBuffer CreateBuffer;
   PFN_vkDestroyBuffer DestroyBuffer;
-  PFN_vkCreateBufferView CreateBufferView;
-  PFN_vkDestroyBufferView DestroyBufferView;
   PFN_vkCreateImage CreateImage;
   PFN_vkDestroyImage DestroyImage;
   PFN_vkGetImageSubresourceLayout GetImageSubresourceLayout;
   PFN_vkCreateImageView CreateImageView;
   PFN_vkDestroyImageView DestroyImageView;
+  PFN_vkCreateCommandPool CreateCommandPool;
+  PFN_vkDestroyCommandPool DestroyCommandPool;
+  PFN_vkResetCommandPool ResetCommandPool;
+  PFN_vkAllocateCommandBuffers AllocateCommandBuffers;
+  PFN_vkFreeCommandBuffers FreeCommandBuffers;
+  PFN_vkBeginCommandBuffer BeginCommandBuffer;
+  PFN_vkEndCommandBuffer EndCommandBuffer;
+  PFN_vkResetCommandBuffer ResetCommandBuffer;
+  PFN_vkCmdCopyBuffer CmdCopyBuffer;
+  PFN_vkCmdCopyImage CmdCopyImage;
+  PFN_vkCmdCopyBufferToImage CmdCopyBufferToImage;
+  PFN_vkCmdCopyImageToBuffer CmdCopyImageToBuffer;
+  PFN_vkCmdUpdateBuffer CmdUpdateBuffer;
+  PFN_vkCmdFillBuffer CmdFillBuffer;
+  PFN_vkCmdPipelineBarrier CmdPipelineBarrier;
+  PFN_vkCmdBeginQuery CmdBeginQuery;
+  PFN_vkCmdEndQuery CmdEndQuery;
+  PFN_vkCmdResetQueryPool CmdResetQueryPool;
+  PFN_vkCmdWriteTimestamp CmdWriteTimestamp;
+  PFN_vkCmdCopyQueryPoolResults CmdCopyQueryPoolResults;
+  PFN_vkCmdExecuteCommands CmdExecuteCommands;
+
+  // Vulkan compute API interface definitions
+  PFN_vkCreateEvent CreateEvent;
+  PFN_vkDestroyEvent DestroyEvent;
+  PFN_vkGetEventStatus GetEventStatus;
+  PFN_vkSetEvent SetEvent;
+  PFN_vkResetEvent ResetEvent;
+  PFN_vkCreateBufferView CreateBufferView;
+  PFN_vkDestroyBufferView DestroyBufferView;
   PFN_vkCreateShaderModule CreateShaderModule;
   PFN_vkDestroyShaderModule DestroyShaderModule;
   PFN_vkCreatePipelineCache CreatePipelineCache;
   PFN_vkDestroyPipelineCache DestroyPipelineCache;
   PFN_vkGetPipelineCacheData GetPipelineCacheData;
   PFN_vkMergePipelineCaches MergePipelineCaches;
-  PFN_vkCreateGraphicsPipelines CreateGraphicsPipelines;
   PFN_vkCreateComputePipelines CreateComputePipelines;
   PFN_vkDestroyPipeline DestroyPipeline;
   PFN_vkCreatePipelineLayout CreatePipelineLayout;
@@ -346,20 +403,23 @@ struct VkDevDispatchTable
   PFN_vkAllocateDescriptorSets AllocateDescriptorSets;
   PFN_vkFreeDescriptorSets FreeDescriptorSets;
   PFN_vkUpdateDescriptorSets UpdateDescriptorSets;
+  PFN_vkCmdBindPipeline CmdBindPipeline;
+  PFN_vkCmdBindDescriptorSets CmdBindDescriptorSets;
+  PFN_vkCmdClearColorImage CmdClearColorImage;
+  PFN_vkCmdDispatch CmdDispatch;
+  PFN_vkCmdDispatchIndirect CmdDispatchIndirect;
+  PFN_vkCmdSetEvent CmdSetEvent;
+  PFN_vkCmdResetEvent CmdResetEvent;
+  PFN_vkCmdWaitEvents CmdWaitEvents;
+  PFN_vkCmdPushConstants CmdPushConstants;
+
+  // Vulkan graphics API interface definitions
+  PFN_vkCreateGraphicsPipelines CreateGraphicsPipelines;
   PFN_vkCreateFramebuffer CreateFramebuffer;
   PFN_vkDestroyFramebuffer DestroyFramebuffer;
   PFN_vkCreateRenderPass CreateRenderPass;
   PFN_vkDestroyRenderPass DestroyRenderPass;
   PFN_vkGetRenderAreaGranularity GetRenderAreaGranularity;
-  PFN_vkCreateCommandPool CreateCommandPool;
-  PFN_vkDestroyCommandPool DestroyCommandPool;
-  PFN_vkResetCommandPool ResetCommandPool;
-  PFN_vkAllocateCommandBuffers AllocateCommandBuffers;
-  PFN_vkFreeCommandBuffers FreeCommandBuffers;
-  PFN_vkBeginCommandBuffer BeginCommandBuffer;
-  PFN_vkEndCommandBuffer EndCommandBuffer;
-  PFN_vkResetCommandBuffer ResetCommandBuffer;
-  PFN_vkCmdBindPipeline CmdBindPipeline;
   PFN_vkCmdSetViewport CmdSetViewport;
   PFN_vkCmdSetScissor CmdSetScissor;
   PFN_vkCmdSetLineWidth CmdSetLineWidth;
@@ -369,66 +429,41 @@ struct VkDevDispatchTable
   PFN_vkCmdSetStencilCompareMask CmdSetStencilCompareMask;
   PFN_vkCmdSetStencilWriteMask CmdSetStencilWriteMask;
   PFN_vkCmdSetStencilReference CmdSetStencilReference;
-  PFN_vkCmdBindDescriptorSets CmdBindDescriptorSets;
   PFN_vkCmdBindIndexBuffer CmdBindIndexBuffer;
   PFN_vkCmdBindVertexBuffers CmdBindVertexBuffers;
   PFN_vkCmdDraw CmdDraw;
   PFN_vkCmdDrawIndexed CmdDrawIndexed;
   PFN_vkCmdDrawIndirect CmdDrawIndirect;
   PFN_vkCmdDrawIndexedIndirect CmdDrawIndexedIndirect;
-  PFN_vkCmdDispatch CmdDispatch;
-  PFN_vkCmdDispatchIndirect CmdDispatchIndirect;
-  PFN_vkCmdCopyBuffer CmdCopyBuffer;
-  PFN_vkCmdCopyImage CmdCopyImage;
   PFN_vkCmdBlitImage CmdBlitImage;
-  PFN_vkCmdCopyBufferToImage CmdCopyBufferToImage;
-  PFN_vkCmdCopyImageToBuffer CmdCopyImageToBuffer;
-  PFN_vkCmdUpdateBuffer CmdUpdateBuffer;
-  PFN_vkCmdFillBuffer CmdFillBuffer;
-  PFN_vkCmdClearColorImage CmdClearColorImage;
   PFN_vkCmdClearDepthStencilImage CmdClearDepthStencilImage;
   PFN_vkCmdClearAttachments CmdClearAttachments;
   PFN_vkCmdResolveImage CmdResolveImage;
-  PFN_vkCmdSetEvent CmdSetEvent;
-  PFN_vkCmdResetEvent CmdResetEvent;
-  PFN_vkCmdWaitEvents CmdWaitEvents;
-  PFN_vkCmdPipelineBarrier CmdPipelineBarrier;
-  PFN_vkCmdBeginQuery CmdBeginQuery;
-  PFN_vkCmdEndQuery CmdEndQuery;
-  PFN_vkCmdResetQueryPool CmdResetQueryPool;
-  PFN_vkCmdWriteTimestamp CmdWriteTimestamp;
-  PFN_vkCmdCopyQueryPoolResults CmdCopyQueryPoolResults;
-  PFN_vkCmdPushConstants CmdPushConstants;
   PFN_vkCmdBeginRenderPass CmdBeginRenderPass;
   PFN_vkCmdNextSubpass CmdNextSubpass;
   PFN_vkCmdEndRenderPass CmdEndRenderPass;
-  PFN_vkCmdExecuteCommands CmdExecuteCommands;
 
-  // Vulkan 1.1 core API interface definitions.
+  // Vulkan base 1.1 API interface definitions.
   PFN_vkBindBufferMemory2 BindBufferMemory2;
   PFN_vkBindImageMemory2 BindImageMemory2;
   PFN_vkGetDeviceGroupPeerMemoryFeatures GetDeviceGroupPeerMemoryFeatures;
   PFN_vkCmdSetDeviceMask CmdSetDeviceMask;
-  PFN_vkCmdDispatchBase CmdDispatchBase;
   PFN_vkGetImageMemoryRequirements2 GetImageMemoryRequirements2;
   PFN_vkGetBufferMemoryRequirements2 GetBufferMemoryRequirements2;
   PFN_vkGetImageSparseMemoryRequirements2 GetImageSparseMemoryRequirements2;
   PFN_vkTrimCommandPool TrimCommandPool;
   PFN_vkGetDeviceQueue2 GetDeviceQueue2;
-  PFN_vkCreateSamplerYcbcrConversion CreateSamplerYcbcrConversion;
-  PFN_vkDestroySamplerYcbcrConversion DestroySamplerYcbcrConversion;
+
+  // Vulkan compute 1.1 API interface definitions.
+  PFN_vkCmdDispatchBase CmdDispatchBase;
   PFN_vkCreateDescriptorUpdateTemplate CreateDescriptorUpdateTemplate;
   PFN_vkDestroyDescriptorUpdateTemplate DestroyDescriptorUpdateTemplate;
   PFN_vkUpdateDescriptorSetWithTemplate UpdateDescriptorSetWithTemplate;
   PFN_vkGetDescriptorSetLayoutSupport GetDescriptorSetLayoutSupport;
+  PFN_vkCreateSamplerYcbcrConversion CreateSamplerYcbcrConversion;
+  PFN_vkDestroySamplerYcbcrConversion DestroySamplerYcbcrConversion;
 
-  // Vulkan 1.2 core API interface definitions.
-  PFN_vkCmdDrawIndirectCount CmdDrawIndirectCount;
-  PFN_vkCmdDrawIndexedIndirectCount CmdDrawIndexedIndirectCount;
-  PFN_vkCreateRenderPass2 CreateRenderPass2;
-  PFN_vkCmdBeginRenderPass2 CmdBeginRenderPass2;
-  PFN_vkCmdNextSubpass2 CmdNextSubpass2;
-  PFN_vkCmdEndRenderPass2 CmdEndRenderPass2;
+  // Vulkan base 1.2 API interface definitions.
   PFN_vkResetQueryPool ResetQueryPool;
   PFN_vkGetSemaphoreCounterValue GetSemaphoreCounterValue;
   PFN_vkWaitSemaphores WaitSemaphores;
@@ -437,14 +472,19 @@ struct VkDevDispatchTable
   PFN_vkGetBufferOpaqueCaptureAddress GetBufferOpaqueCaptureAddress;
   PFN_vkGetDeviceMemoryOpaqueCaptureAddress GetDeviceMemoryOpaqueCaptureAddress;
 
-  // Vulkan 1.3 core API interface definitions.
+  // Vulkan graphics 1.2 API interface definitions.
+  PFN_vkCmdDrawIndirectCount CmdDrawIndirectCount;
+  PFN_vkCmdDrawIndexedIndirectCount CmdDrawIndexedIndirectCount;
+  PFN_vkCreateRenderPass2 CreateRenderPass2;
+  PFN_vkCmdBeginRenderPass2 CmdBeginRenderPass2;
+  PFN_vkCmdNextSubpass2 CmdNextSubpass2;
+  PFN_vkCmdEndRenderPass2 CmdEndRenderPass2;
+
+  // Vulkan base 1.3 API interface definitions.
   PFN_vkCreatePrivateDataSlot CreatePrivateDataSlot;
   PFN_vkDestroyPrivateDataSlot DestroyPrivateDataSlot;
   PFN_vkSetPrivateData SetPrivateData;
   PFN_vkGetPrivateData GetPrivateData;
-  PFN_vkCmdSetEvent2 CmdSetEvent2;
-  PFN_vkCmdResetEvent2 CmdResetEvent2;
-  PFN_vkCmdWaitEvents2 CmdWaitEvents2;
   PFN_vkCmdPipelineBarrier2 CmdPipelineBarrier2;
   PFN_vkCmdWriteTimestamp2 CmdWriteTimestamp2;
   PFN_vkQueueSubmit2 QueueSubmit2;
@@ -452,6 +492,16 @@ struct VkDevDispatchTable
   PFN_vkCmdCopyImage2 CmdCopyImage2;
   PFN_vkCmdCopyBufferToImage2 CmdCopyBufferToImage2;
   PFN_vkCmdCopyImageToBuffer2 CmdCopyImageToBuffer2;
+  PFN_vkGetDeviceBufferMemoryRequirements GetDeviceBufferMemoryRequirements;
+  PFN_vkGetDeviceImageMemoryRequirements GetDeviceImageMemoryRequirements;
+  PFN_vkGetDeviceImageSparseMemoryRequirements GetDeviceImageSparseMemoryRequirements;
+
+  // Vulkan compute 1.3 API interface definitions.
+  PFN_vkCmdSetEvent2 CmdSetEvent2;
+  PFN_vkCmdResetEvent2 CmdResetEvent2;
+  PFN_vkCmdWaitEvents2 CmdWaitEvents2;
+
+  // Vulkan graphics 1.3 API interface definitions.
   PFN_vkCmdBlitImage2 CmdBlitImage2;
   PFN_vkCmdResolveImage2 CmdResolveImage2;
   PFN_vkCmdBeginRendering CmdBeginRendering;
@@ -471,9 +521,31 @@ struct VkDevDispatchTable
   PFN_vkCmdSetRasterizerDiscardEnable CmdSetRasterizerDiscardEnable;
   PFN_vkCmdSetDepthBiasEnable CmdSetDepthBiasEnable;
   PFN_vkCmdSetPrimitiveRestartEnable CmdSetPrimitiveRestartEnable;
-  PFN_vkGetDeviceBufferMemoryRequirements GetDeviceBufferMemoryRequirements;
-  PFN_vkGetDeviceImageMemoryRequirements GetDeviceImageMemoryRequirements;
-  PFN_vkGetDeviceImageSparseMemoryRequirements GetDeviceImageSparseMemoryRequirements;
+
+  // Vulkan base 1.4 API interface definitions.
+  PFN_vkMapMemory2 MapMemory2;
+  PFN_vkUnmapMemory2 UnmapMemory2;
+  PFN_vkGetDeviceImageSubresourceLayout GetDeviceImageSubresourceLayout;
+  PFN_vkGetImageSubresourceLayout2 GetImageSubresourceLayout2;
+  PFN_vkCopyMemoryToImage CopyMemoryToImage;
+  PFN_vkCopyImageToMemory CopyImageToMemory;
+  PFN_vkCopyImageToImage CopyImageToImage;
+  PFN_vkTransitionImageLayout TransitionImageLayout;
+
+  // Vulkan compute 1.4 API interface definitions.
+  PFN_vkCmdPushDescriptorSet CmdPushDescriptorSet;
+  PFN_vkCmdPushDescriptorSetWithTemplate CmdPushDescriptorSetWithTemplate;
+  PFN_vkCmdBindDescriptorSets2 CmdBindDescriptorSets2;
+  PFN_vkCmdPushConstants2 CmdPushConstants2;
+  PFN_vkCmdPushDescriptorSet2 CmdPushDescriptorSet2;
+  PFN_vkCmdPushDescriptorSetWithTemplate2 CmdPushDescriptorSetWithTemplate2;
+
+  // Vulkan graphics 1.4 API interface definitions.
+  PFN_vkCmdSetLineStipple CmdSetLineStipple;
+  PFN_vkCmdBindIndexBuffer2 CmdBindIndexBuffer2;
+  PFN_vkGetRenderingAreaGranularity GetRenderingAreaGranularity;
+  PFN_vkCmdSetRenderingAttachmentLocations CmdSetRenderingAttachmentLocations;
+  PFN_vkCmdSetRenderingInputAttachmentIndices CmdSetRenderingInputAttachmentIndices;
 
   // VK_KHR_swapchain
   PFN_vkCreateSwapchainKHR CreateSwapchainKHR;
@@ -633,8 +705,6 @@ struct VkDevDispatchTable
   PFN_vkCmdPipelineBarrier2KHR CmdPipelineBarrier2KHR;
   PFN_vkCmdWriteTimestamp2KHR CmdWriteTimestamp2KHR;
   PFN_vkQueueSubmit2KHR QueueSubmit2KHR;
-  PFN_vkCmdWriteBufferMarker2AMD CmdWriteBufferMarker2AMD;
-  PFN_vkGetQueueCheckpointData2NV GetQueueCheckpointData2NV;
 
   // VK_KHR_copy_commands2
   PFN_vkCmdCopyBuffer2KHR CmdCopyBuffer2KHR;
@@ -667,6 +737,19 @@ struct VkDevDispatchTable
   PFN_vkGetDeviceImageSubresourceLayoutKHR GetDeviceImageSubresourceLayoutKHR;
   PFN_vkGetImageSubresourceLayout2KHR GetImageSubresourceLayout2KHR;
 
+  // VK_KHR_present_wait2
+  PFN_vkWaitForPresent2KHR WaitForPresent2KHR;
+
+  // VK_KHR_pipeline_binary
+  PFN_vkCreatePipelineBinariesKHR CreatePipelineBinariesKHR;
+  PFN_vkDestroyPipelineBinaryKHR DestroyPipelineBinaryKHR;
+  PFN_vkGetPipelineKeyKHR GetPipelineKeyKHR;
+  PFN_vkGetPipelineBinaryDataKHR GetPipelineBinaryDataKHR;
+  PFN_vkReleaseCapturedPipelineDataKHR ReleaseCapturedPipelineDataKHR;
+
+  // VK_KHR_swapchain_maintenance1
+  PFN_vkReleaseSwapchainImagesKHR ReleaseSwapchainImagesKHR;
+
   // VK_KHR_line_rasterization
   PFN_vkCmdSetLineStippleKHR CmdSetLineStippleKHR;
 
@@ -680,6 +763,13 @@ struct VkDevDispatchTable
   PFN_vkCmdPushDescriptorSetWithTemplate2KHR CmdPushDescriptorSetWithTemplate2KHR;
   PFN_vkCmdSetDescriptorBufferOffsets2EXT CmdSetDescriptorBufferOffsets2EXT;
   PFN_vkCmdBindDescriptorBufferEmbeddedSamplers2EXT CmdBindDescriptorBufferEmbeddedSamplers2EXT;
+
+  // VK_KHR_copy_memory_indirect
+  PFN_vkCmdCopyMemoryIndirectKHR CmdCopyMemoryIndirectKHR;
+  PFN_vkCmdCopyMemoryToImageIndirectKHR CmdCopyMemoryToImageIndirectKHR;
+
+  // VK_KHR_maintenance10
+  PFN_vkCmdEndRendering2KHR CmdEndRendering2KHR;
 
   // VK_EXT_debug_marker
   PFN_vkDebugMarkerSetObjectTagEXT DebugMarkerSetObjectTagEXT;
@@ -705,7 +795,9 @@ struct VkDevDispatchTable
 
   // VK_NVX_image_view_handle
   PFN_vkGetImageViewHandleNVX GetImageViewHandleNVX;
+  PFN_vkGetImageViewHandle64NVX GetImageViewHandle64NVX;
   PFN_vkGetImageViewAddressNVX GetImageViewAddressNVX;
+  PFN_vkGetDeviceCombinedImageSamplerIndexNVX GetDeviceCombinedImageSamplerIndexNVX;
 
   // VK_AMD_draw_indirect_count
   PFN_vkCmdDrawIndirectCountAMD CmdDrawIndirectCountAMD;
@@ -771,6 +863,17 @@ struct VkDevDispatchTable
   PFN_vkCmdDispatchGraphIndirectCountAMDX CmdDispatchGraphIndirectCountAMDX;
 #endif // VK_ENABLE_BETA_EXTENSIONS
 
+  // VK_EXT_descriptor_heap
+  PFN_vkWriteSamplerDescriptorsEXT WriteSamplerDescriptorsEXT;
+  PFN_vkWriteResourceDescriptorsEXT WriteResourceDescriptorsEXT;
+  PFN_vkCmdBindSamplerHeapEXT CmdBindSamplerHeapEXT;
+  PFN_vkCmdBindResourceHeapEXT CmdBindResourceHeapEXT;
+  PFN_vkCmdPushDataEXT CmdPushDataEXT;
+  PFN_vkGetImageOpaqueCaptureDataEXT GetImageOpaqueCaptureDataEXT;
+  PFN_vkRegisterCustomBorderColorEXT RegisterCustomBorderColorEXT;
+  PFN_vkUnregisterCustomBorderColorEXT UnregisterCustomBorderColorEXT;
+  PFN_vkGetTensorOpaqueCaptureDataARM GetTensorOpaqueCaptureDataARM;
+
   // VK_EXT_sample_locations
   PFN_vkCmdSetSampleLocationsEXT CmdSetSampleLocationsEXT;
 
@@ -807,6 +910,7 @@ struct VkDevDispatchTable
 
   // VK_AMD_buffer_marker
   PFN_vkCmdWriteBufferMarkerAMD CmdWriteBufferMarkerAMD;
+  PFN_vkCmdWriteBufferMarker2AMD CmdWriteBufferMarker2AMD;
 
   // VK_EXT_calibrated_timestamps
   PFN_vkGetCalibratedTimestampsEXT GetCalibratedTimestampsEXT;
@@ -823,6 +927,13 @@ struct VkDevDispatchTable
   // VK_NV_device_diagnostic_checkpoints
   PFN_vkCmdSetCheckpointNV CmdSetCheckpointNV;
   PFN_vkGetQueueCheckpointDataNV GetQueueCheckpointDataNV;
+  PFN_vkGetQueueCheckpointData2NV GetQueueCheckpointData2NV;
+
+  // VK_EXT_present_timing
+  PFN_vkSetSwapchainPresentTimingQueueSizeEXT SetSwapchainPresentTimingQueueSizeEXT;
+  PFN_vkGetSwapchainTimingPropertiesEXT GetSwapchainTimingPropertiesEXT;
+  PFN_vkGetSwapchainTimeDomainPropertiesEXT GetSwapchainTimeDomainPropertiesEXT;
+  PFN_vkGetPastPresentationTimingEXT GetPastPresentationTimingEXT;
 
   // VK_INTEL_performance_query
   PFN_vkInitializePerformanceApiINTEL InitializePerformanceApiINTEL;
@@ -896,12 +1007,19 @@ struct VkDevDispatchTable
   PFN_vkGetPrivateDataEXT GetPrivateDataEXT;
 
   // VK_NV_cuda_kernel_launch
+#ifdef VK_ENABLE_BETA_EXTENSIONS
   PFN_vkCreateCudaModuleNV CreateCudaModuleNV;
   PFN_vkGetCudaModuleCacheNV GetCudaModuleCacheNV;
   PFN_vkCreateCudaFunctionNV CreateCudaFunctionNV;
   PFN_vkDestroyCudaModuleNV DestroyCudaModuleNV;
   PFN_vkDestroyCudaFunctionNV DestroyCudaFunctionNV;
   PFN_vkCmdCudaLaunchKernelNV CmdCudaLaunchKernelNV;
+#endif // VK_ENABLE_BETA_EXTENSIONS
+
+  // VK_QCOM_tile_shading
+  PFN_vkCmdDispatchTileQCOM CmdDispatchTileQCOM;
+  PFN_vkCmdBeginPerTileExecutionQCOM CmdBeginPerTileExecutionQCOM;
+  PFN_vkCmdEndPerTileExecutionQCOM CmdEndPerTileExecutionQCOM;
 
   // VK_EXT_metal_objects
 #ifdef VK_USE_PLATFORM_METAL_EXT
@@ -1023,6 +1141,12 @@ struct VkDevDispatchTable
   PFN_vkCmdUpdatePipelineIndirectBufferNV CmdUpdatePipelineIndirectBufferNV;
   PFN_vkGetPipelineIndirectDeviceAddressNV GetPipelineIndirectDeviceAddressNV;
 
+  // VK_OHOS_external_memory
+#ifdef VK_USE_PLATFORM_OHOS
+  PFN_vkGetNativeBufferPropertiesOHOS GetNativeBufferPropertiesOHOS;
+  PFN_vkGetMemoryNativeBufferOHOS GetMemoryNativeBufferOHOS;
+#endif // VK_USE_PLATFORM_OHOS
+
   // VK_EXT_extended_dynamic_state3
   PFN_vkCmdSetDepthClampEnableEXT CmdSetDepthClampEnableEXT;
   PFN_vkCmdSetPolygonModeEXT CmdSetPolygonModeEXT;
@@ -1056,6 +1180,18 @@ struct VkDevDispatchTable
   PFN_vkCmdSetRepresentativeFragmentTestEnableNV CmdSetRepresentativeFragmentTestEnableNV;
   PFN_vkCmdSetCoverageReductionModeNV CmdSetCoverageReductionModeNV;
 
+  // VK_ARM_tensors
+  PFN_vkCreateTensorARM CreateTensorARM;
+  PFN_vkDestroyTensorARM DestroyTensorARM;
+  PFN_vkCreateTensorViewARM CreateTensorViewARM;
+  PFN_vkDestroyTensorViewARM DestroyTensorViewARM;
+  PFN_vkGetTensorMemoryRequirementsARM GetTensorMemoryRequirementsARM;
+  PFN_vkBindTensorMemoryARM BindTensorMemoryARM;
+  PFN_vkGetDeviceTensorMemoryRequirementsARM GetDeviceTensorMemoryRequirementsARM;
+  PFN_vkCmdCopyTensorARM CmdCopyTensorARM;
+  PFN_vkGetTensorOpaqueCaptureDescriptorDataARM GetTensorOpaqueCaptureDescriptorDataARM;
+  PFN_vkGetTensorViewOpaqueCaptureDescriptorDataARM GetTensorViewOpaqueCaptureDescriptorDataARM;
+
   // VK_EXT_shader_module_identifier
   PFN_vkGetShaderModuleIdentifierEXT GetShaderModuleIdentifierEXT;
   PFN_vkGetShaderModuleCreateInfoIdentifierEXT GetShaderModuleCreateInfoIdentifierEXT;
@@ -1066,15 +1202,23 @@ struct VkDevDispatchTable
   PFN_vkBindOpticalFlowSessionImageNV BindOpticalFlowSessionImageNV;
   PFN_vkCmdOpticalFlowExecuteNV CmdOpticalFlowExecuteNV;
 
+  // VK_AMD_anti_lag
+  PFN_vkAntiLagUpdateAMD AntiLagUpdateAMD;
+
   // VK_EXT_shader_object
   PFN_vkCreateShadersEXT CreateShadersEXT;
   PFN_vkDestroyShaderEXT DestroyShaderEXT;
   PFN_vkGetShaderBinaryDataEXT GetShaderBinaryDataEXT;
   PFN_vkCmdBindShadersEXT CmdBindShadersEXT;
+  PFN_vkCmdSetDepthClampRangeEXT CmdSetDepthClampRangeEXT;
 
   // VK_QCOM_tile_properties
   PFN_vkGetFramebufferTilePropertiesQCOM GetFramebufferTilePropertiesQCOM;
   PFN_vkGetDynamicRenderingTilePropertiesQCOM GetDynamicRenderingTilePropertiesQCOM;
+
+  // VK_NV_cooperative_vector
+  PFN_vkConvertCooperativeVectorMatrixNV ConvertCooperativeVectorMatrixNV;
+  PFN_vkCmdConvertCooperativeVectorMatrixNV CmdConvertCooperativeVectorMatrixNV;
 
   // VK_NV_low_latency2
   PFN_vkSetLatencySleepModeNV SetLatencySleepModeNV;
@@ -1083,6 +1227,17 @@ struct VkDevDispatchTable
   PFN_vkGetLatencyTimingsNV GetLatencyTimingsNV;
   PFN_vkQueueNotifyOutOfBandNV QueueNotifyOutOfBandNV;
 
+  // VK_ARM_data_graph
+  PFN_vkCreateDataGraphPipelinesARM CreateDataGraphPipelinesARM;
+  PFN_vkCreateDataGraphPipelineSessionARM CreateDataGraphPipelineSessionARM;
+  PFN_vkGetDataGraphPipelineSessionBindPointRequirementsARM GetDataGraphPipelineSessionBindPointRequirementsARM;
+  PFN_vkGetDataGraphPipelineSessionMemoryRequirementsARM GetDataGraphPipelineSessionMemoryRequirementsARM;
+  PFN_vkBindDataGraphPipelineSessionMemoryARM BindDataGraphPipelineSessionMemoryARM;
+  PFN_vkDestroyDataGraphPipelineSessionARM DestroyDataGraphPipelineSessionARM;
+  PFN_vkCmdDispatchDataGraphARM CmdDispatchDataGraphARM;
+  PFN_vkGetDataGraphPipelineAvailablePropertiesARM GetDataGraphPipelineAvailablePropertiesARM;
+  PFN_vkGetDataGraphPipelinePropertiesARM GetDataGraphPipelinePropertiesARM;
+
   // VK_EXT_attachment_feedback_loop_dynamic_state
   PFN_vkCmdSetAttachmentFeedbackLoopEnableEXT CmdSetAttachmentFeedbackLoopEnableEXT;
 
@@ -1090,6 +1245,52 @@ struct VkDevDispatchTable
 #ifdef VK_USE_PLATFORM_SCREEN_QNX
   PFN_vkGetScreenBufferPropertiesQNX GetScreenBufferPropertiesQNX;
 #endif // VK_USE_PLATFORM_SCREEN_QNX
+
+  // VK_QCOM_tile_memory_heap
+  PFN_vkCmdBindTileMemoryQCOM CmdBindTileMemoryQCOM;
+
+  // VK_EXT_memory_decompression
+  PFN_vkCmdDecompressMemoryEXT CmdDecompressMemoryEXT;
+  PFN_vkCmdDecompressMemoryIndirectCountEXT CmdDecompressMemoryIndirectCountEXT;
+
+  // VK_NV_external_compute_queue
+  PFN_vkCreateExternalComputeQueueNV CreateExternalComputeQueueNV;
+  PFN_vkDestroyExternalComputeQueueNV DestroyExternalComputeQueueNV;
+  PFN_vkGetExternalComputeQueueDataNV GetExternalComputeQueueDataNV;
+
+  // VK_NV_cluster_acceleration_structure
+  PFN_vkGetClusterAccelerationStructureBuildSizesNV GetClusterAccelerationStructureBuildSizesNV;
+  PFN_vkCmdBuildClusterAccelerationStructureIndirectNV CmdBuildClusterAccelerationStructureIndirectNV;
+
+  // VK_NV_partitioned_acceleration_structure
+  PFN_vkGetPartitionedAccelerationStructuresBuildSizesNV GetPartitionedAccelerationStructuresBuildSizesNV;
+  PFN_vkCmdBuildPartitionedAccelerationStructuresNV CmdBuildPartitionedAccelerationStructuresNV;
+
+  // VK_EXT_device_generated_commands
+  PFN_vkGetGeneratedCommandsMemoryRequirementsEXT GetGeneratedCommandsMemoryRequirementsEXT;
+  PFN_vkCmdPreprocessGeneratedCommandsEXT CmdPreprocessGeneratedCommandsEXT;
+  PFN_vkCmdExecuteGeneratedCommandsEXT CmdExecuteGeneratedCommandsEXT;
+  PFN_vkCreateIndirectCommandsLayoutEXT CreateIndirectCommandsLayoutEXT;
+  PFN_vkDestroyIndirectCommandsLayoutEXT DestroyIndirectCommandsLayoutEXT;
+  PFN_vkCreateIndirectExecutionSetEXT CreateIndirectExecutionSetEXT;
+  PFN_vkDestroyIndirectExecutionSetEXT DestroyIndirectExecutionSetEXT;
+  PFN_vkUpdateIndirectExecutionSetPipelineEXT UpdateIndirectExecutionSetPipelineEXT;
+  PFN_vkUpdateIndirectExecutionSetShaderEXT UpdateIndirectExecutionSetShaderEXT;
+
+  // VK_EXT_external_memory_metal
+#ifdef VK_USE_PLATFORM_METAL_EXT
+  PFN_vkGetMemoryMetalHandleEXT GetMemoryMetalHandleEXT;
+  PFN_vkGetMemoryMetalHandlePropertiesEXT GetMemoryMetalHandlePropertiesEXT;
+#endif // VK_USE_PLATFORM_METAL_EXT
+
+  // VK_EXT_fragment_density_map_offset
+  PFN_vkCmdEndRendering2EXT CmdEndRendering2EXT;
+
+  // VK_EXT_custom_resolve
+  PFN_vkCmdBeginCustomResolveEXT CmdBeginCustomResolveEXT;
+
+  // VK_NV_compute_occupancy_priority
+  PFN_vkCmdSetComputeOccupancyPriorityNV CmdSetComputeOccupancyPriorityNV;
 
   // for consistency with macros, we declare the CreateDevice pointer here
   // even though it won't actually ever get used and is on the instance dispatch chain

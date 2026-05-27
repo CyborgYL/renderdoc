@@ -1,7 +1,7 @@
 /******************************************************************************
  * The MIT License (MIT)
  *
- * Copyright (c) 2019-2024 Baldur Karlsson
+ * Copyright (c) 2016-2026 Baldur Karlsson
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -65,7 +65,7 @@ rdcarray<GPUCounter> D3D12Replay::EnumerateCounters()
 
   if(m_pNVCounters)
   {
-    ret.append(m_pNVCounters->EnumerateCounters());
+    ret.append(m_pNVCounters->EnumerateCounters(*m_pDevice));
   }
 
   return ret;
@@ -706,7 +706,7 @@ rdcarray<CounterResult> D3D12Replay::FetchCounters(const rdcarray<GPUCounter> &c
 
   m_pDevice->ExecuteLists();
   m_pDevice->FlushLists();
-  m_pDevice->GPUSyncAllQueues();
+  m_pDevice->DeviceWaitForIdle();
 
   D3D12_RANGE range;
   range.Begin = 0;
