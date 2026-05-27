@@ -344,11 +344,6 @@ private:
           blacklist.push_back(strlower(black.trimmed()));
       }
     }
-    for(const rdcstr &black : blacklist)
-    {
-      RDCDEBUG("Blacklist: %s", black.c_str());
-    }
-
     bool inject = true;
 
     // sanity check to make sure we're not going to go into an infinity loop injecting into
